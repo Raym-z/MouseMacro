@@ -190,6 +190,8 @@ export function actionLabel(action: Action): string {
       return `Toggle ${keysLabel(action.keys)}`;
     case "dragLock":
       return `Toggle hold ${buttonName(action.button)}`;
+    case "combined":
+      return action.actions.map(actionLabel).join(" + ");
     case "disable":
       return "Do nothing (disabled)";
     case "none":
@@ -234,6 +236,23 @@ export function actionKeys(action: Action): string[] | null {
   return null;
 }
 
+/** Unwraps a combined action into the editable list of actions. */
+export function splitActions(action: Action): Action[] {
+  return action.type === "combined" ? action.actions : [action];
+}
+
+/**
+ * Collapses the editor's list back into one action. One line stays a plain
+ * action; more become a combined group. "No action" rows are dropped; the
+ * editor validates the rest before saving.
+ */
+export function combineActions(actions: Action[]): Action {
+  const usable = actions.filter((action) => action.type !== "none");
+  if (usable.length === 0) return { type: "none" };
+  if (usable.length === 1) return usable[0];
+  return { type: "combined", actions: usable };
+}
+
 export function actionTypeLabel(action: Action): string {
   switch (action.type) {
     case "shortcut":
@@ -262,6 +281,8 @@ export function actionTypeLabel(action: Action): string {
       return "Toggle keys";
     case "dragLock":
       return "Drag lock";
+    case "combined":
+      return `${action.actions.length} actions`;
     case "disable":
       return "Disable button";
     case "none":
@@ -380,7 +401,29 @@ export function validateMapping(mapping: Mapping): string | null {
   if (mapping.trigger.type === "withButton" && mapping.trigger.button === mapping.button) {
     return "Choose a different second button for the combination.";
   }
-  const action = mapping.action;
+  const problem = validateAction(mapping.action);
+  if (problem) return problem;
+  if (mapping.name && mapping.name.length > 60) {
+    return "Mapping labels can be at most 60 characters.";
+  }
+  return null;
+}
+
+/** Validates the editor's action list, including rows that do nothing. */
+export function validateActionList(actions: Action[]): string | null {
+  if (actions.length > 1) {
+    const blank = actions.findIndex(
+      (action) => action.type === "none" || action.type === "disable",
+    );
+    if (blank >= 0) {
+      return `Action ${blank + 1} does nothing. Choose a type or remove it.`;
+    }
+  }
+  return validateAction(combineActions(actions));
+}
+
+/** Validates one action, recursing into combined groups. */
+export function validateAction(action: Action): string | null {
   if (action.type === "shortcut" || action.type === "holdKeys") {
     if (action.keys.length === 0) {
       return "Choose or record a keyboard shortcut before saving.";
@@ -441,8 +484,23 @@ export function validateMapping(mapping: Mapping): string | null {
   if (action.type === "toggleKeys" && action.keys.length === 0) {
     return "Choose the keys to toggle.";
   }
-  if (mapping.name && mapping.name.length > 60) {
-    return "Mapping labels can be at most 60 characters.";
+  if (action.type === "combined") {
+    if (action.actions.length < 2) {
+      return "Add at least two actions, or remove the extra one.";
+    }
+    if (action.actions.length > 8) {
+      return "A mapping can run at most 8 actions.";
+    }
+    for (const [index, child] of action.actions.entries()) {
+      if (child.type === "combined") {
+        return "Actions cannot be nested.";
+      }
+      if (child.type === "none" || child.type === "disable") {
+        return `Action ${index + 1} does nothing. Choose a type or remove it.`;
+      }
+      const problem = validateAction(child);
+      if (problem) return `Action ${index + 1}: ${problem}`;
+    }
   }
   return null;
 }

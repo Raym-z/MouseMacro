@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::engine::keys::{is_modifier_name, normalize_combo, vk_from_name};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
 
 /// Media keys are sent as their dedicated virtual-key codes. Keeping the list
@@ -303,6 +303,12 @@ pub enum Action {
     DragLock {
         button: MouseButton,
     },
+    /// Several actions that run together, in order. Sustained children stay
+    /// held until the source trigger is released.
+    Combined {
+        #[serde(default)]
+        actions: Vec<Action>,
+    },
     Disable,
     None,
 }
@@ -314,7 +320,11 @@ fn default_macro_repeat() -> u32 {
 impl Action {
     /// Hold-style actions stay down until the source trigger is released.
     pub fn is_sustained(&self) -> bool {
-        matches!(self, Action::MouseHold { .. } | Action::HoldKeys { .. })
+        match self {
+            Action::MouseHold { .. } | Action::HoldKeys { .. } => true,
+            Action::Combined { actions } => actions.iter().any(Action::is_sustained),
+            _ => false,
+        }
     }
 }
 
@@ -1000,6 +1010,10 @@ fn sanitize_mappings(
 /// Repairs an action in place. Returns false when nothing usable remains, so
 /// the caller can drop the mapping or key mapping that owns it.
 fn sanitize_action(action: &mut Action) -> bool {
+    sanitize_action_depth(action, 0)
+}
+
+fn sanitize_action_depth(action: &mut Action, depth: usize) -> bool {
     match action {
         Action::Shortcut { keys } | Action::HoldKeys { keys } => {
             sanitize_key_list(keys, 8)
@@ -1069,6 +1083,29 @@ fn sanitize_action(action: &mut Action) -> bool {
             }
         }
         Action::ToggleKeys { keys } => sanitize_key_list(keys, 4),
+        Action::Combined { actions } => {
+            // Hand-edited files can nest these arbitrarily; cap the depth so
+            // loading stays cheap and cannot overflow the stack.
+            if depth >= 4 {
+                actions.clear();
+                return false;
+            }
+            let mut flat: Vec<Action> = Vec::new();
+            for mut child in std::mem::take(actions) {
+                if !sanitize_action_depth(&mut child, depth + 1) {
+                    continue;
+                }
+                match child {
+                    // These say "do nothing"; inside a group they are noise.
+                    Action::Disable | Action::None => {}
+                    Action::Combined { actions: nested } => flat.extend(nested),
+                    other => flat.push(other),
+                }
+            }
+            flat.truncate(8);
+            *actions = flat;
+            !actions.is_empty()
+        }
         Action::Window { .. }
         | Action::DragLock { .. }
         | Action::MouseClick { .. }
@@ -1444,6 +1481,67 @@ mod tests {
         };
         settings.sanitize();
         assert_eq!(settings.panic_hotkey, vec!["ctrl", "f12"]);
+    }
+
+    #[test]
+    fn combined_actions_are_sustained_when_a_child_is() {
+        let tap = Action::Shortcut {
+            keys: vec!["h".into()],
+        };
+        let hold = Action::MouseHold {
+            button: MouseButton::Left,
+        };
+        let combined = Action::Combined {
+            actions: vec![tap.clone(), hold],
+        };
+        assert!(combined.is_sustained());
+
+        let taps = Action::Combined { actions: vec![tap] };
+        assert!(!taps.is_sustained());
+    }
+
+    #[test]
+    fn sanitize_flattens_combined_actions_and_drops_empty_children() {
+        let mut action = Action::Combined {
+            actions: vec![
+                Action::Combined {
+                    actions: vec![Action::Shortcut {
+                        keys: vec!["H".into()],
+                    }],
+                },
+                Action::None,
+                Action::MouseHold {
+                    button: MouseButton::Left,
+                },
+            ],
+        };
+        assert!(sanitize_action(&mut action));
+        match action {
+            Action::Combined { actions } => {
+                assert_eq!(actions.len(), 2);
+                assert_eq!(
+                    actions[0],
+                    Action::Shortcut {
+                        keys: vec!["h".into()]
+                    }
+                );
+                assert_eq!(
+                    actions[1],
+                    Action::MouseHold {
+                        button: MouseButton::Left
+                    }
+                );
+            }
+            other => panic!("expected a combined action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn combined_actions_drop_children_that_cannot_run() {
+        let mut action = Action::Combined {
+            actions: vec![Action::Shortcut { keys: vec![] }, Action::Disable],
+        };
+        assert!(!sanitize_action(&mut action));
     }
 
     #[test]

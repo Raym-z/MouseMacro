@@ -911,15 +911,27 @@ impl AppState {
 }
 
 fn collect_launch_targets(profile: &Profile) -> Vec<String> {
-    profile
+    fn collect(action: &Action, targets: &mut Vec<String>) {
+        match action {
+            Action::Launch { target } => targets.push(target.clone()),
+            Action::Combined { actions } => {
+                for child in actions {
+                    collect(child, targets);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut targets = Vec::new();
+    for mapping in profile
         .mappings
         .iter()
         .chain(profile.layers.iter().flat_map(|layer| layer.mappings.iter()))
-        .filter_map(|mapping| match &mapping.action {
-            Action::Launch { target } => Some(target.clone()),
-            _ => None,
-        })
-        .collect()
+    {
+        collect(&mapping.action, &mut targets);
+    }
+    targets
 }
 
 fn validate_profile_name(name: &str) -> Result<String, String> {
@@ -1154,6 +1166,27 @@ pub fn validate_action(action: &mut Action) -> Result<(), String> {
             }
             if let Some(unknown) = keys.iter().find(|key| vk_from_name(key).is_none()) {
                 return Err(format!("Unknown key “{unknown}”."));
+            }
+        }
+        Action::Combined { actions } => {
+            if actions.len() < 2 {
+                return Err("Add at least two actions, or remove the extra one.".into());
+            }
+            if actions.len() > 8 {
+                return Err("A mapping can run at most 8 actions.".into());
+            }
+            for (index, child) in actions.iter_mut().enumerate() {
+                if matches!(child, Action::Disable | Action::None) {
+                    return Err(format!(
+                        "Action {} does nothing. Choose a type or remove it.",
+                        index + 1
+                    ));
+                }
+                if matches!(child, Action::Combined { .. }) {
+                    return Err("Actions cannot be nested. Edit the list instead.".into());
+                }
+                validate_action(child)
+                    .map_err(|error| format!("Action {}: {error}", index + 1))?;
             }
         }
         Action::Window { .. }

@@ -48,9 +48,12 @@ import {
 import {
   actionLabel,
   buttonLabel,
+  combineActions,
   keyLabel,
   macroStepLabel,
+  splitActions,
   triggerLabel,
+  validateActionList,
   validateMapping,
 } from "../lib/format";
 
@@ -99,6 +102,8 @@ function defaultAction(type: Action["type"]): Action {
       return { type, keys: [] };
     case "dragLock":
       return { type, button: "left" };
+    case "combined":
+      return { type, actions: [] };
     case "disable":
     case "none":
       return { type };
@@ -145,24 +150,25 @@ const MACRO_STEP_OPTIONS: Array<{ value: MacroStepType; label: string }> = [
   { value: "typeText", label: "Type text" },
 ];
 
-/**
- * The action editor, shared by mouse mappings and keyboard mappings. It owns
- * the per-type fields and the macro builder; capture wiring stays with the
- * parent so both editors can reuse the same recording flow.
- */
-export function ActionFields({
-  action,
-  setAction,
-  capture,
-  newStepType,
-  setNewStepType,
-}: {
+interface ActionEditorProps {
   action: Action;
   setAction: (action: Action) => void;
   capture: CaptureControl;
   newStepType: MacroStepType;
   setNewStepType: (type: MacroStepType) => void;
-}) {
+}
+
+/**
+ * One action's fields. Combined actions render several of these; the parent
+ * owns the list and the recording target so both editors share the wiring.
+ */
+export function ActionEditor({
+  action,
+  setAction,
+  capture,
+  newStepType,
+  setNewStepType,
+}: ActionEditorProps) {
   const needsKeys =
     action.type === "shortcut" || action.type === "holdKeys" || action.type === "key";
   const recordedKeys =
@@ -174,11 +180,6 @@ export function ActionFields({
 
   return (
     <>
-      <StepSection
-        index="3"
-        title="Action"
-        hint="What should happen when the trigger is detected?"
-      >
         <Field label="Action type">
           <Select
             value={action.type}
@@ -539,8 +540,110 @@ export function ActionFields({
             for a mapping that is configured but intentionally silent.
           </Callout>
         )}
-      </StepSection>
     </>
+  );
+}
+
+export function ActionsFields({
+  actions,
+  setActions,
+  captureFor,
+  newStepType,
+  setNewStepType,
+}: {
+  actions: Action[];
+  setActions: (actions: Action[]) => void;
+  captureFor: (index: number) => CaptureControl;
+  newStepType: MacroStepType;
+  setNewStepType: (type: MacroStepType) => void;
+}) {
+  const update = (index: number, next: Action) =>
+    setActions(actions.map((item, at) => (at === index ? next : item)));
+
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= actions.length) return;
+    const next = [...actions];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    setActions(next);
+  };
+
+  return (
+    <StepSection
+      index="3"
+      title={actions.length > 1 ? "Actions" : "Action"}
+      hint="Everything here runs together, in order, the moment the trigger fires."
+    >
+      <div className="space-y-3">
+        {actions.map((action, index) => (
+          <div
+            key={index}
+            className={cn(
+              actions.length > 1 &&
+                "rounded-xl border border-zinc-200/80 bg-zinc-50/40 p-3 dark:border-white/[0.07] dark:bg-white/[0.015]",
+            )}
+          >
+            {actions.length > 1 && (
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[10.5px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                  Action {index + 1}
+                </span>
+                <div className="flex items-center gap-0.5">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<ArrowUp />}
+                    disabled={index === 0}
+                    onClick={() => move(index, index - 1)}
+                    aria-label={`Move action ${index + 1} up`}
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<ArrowDown />}
+                    disabled={index === actions.length - 1}
+                    onClick={() => move(index, index + 1)}
+                    aria-label={`Move action ${index + 1} down`}
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Trash2 />}
+                    onClick={() =>
+                      setActions(actions.filter((_, at) => at !== index))
+                    }
+                    aria-label={`Remove action ${index + 1}`}
+                  />
+                </div>
+              </div>
+            )}
+            <ActionEditor
+              action={action}
+              setAction={(next) => update(index, next)}
+              capture={captureFor(index)}
+              newStepType={newStepType}
+              setNewStepType={setNewStepType}
+            />
+          </div>
+        ))}
+      </div>
+
+      <Button
+        size="sm"
+        variant="secondary"
+        icon={<Plus />}
+        className="mt-3"
+        disabled={actions.length >= 8}
+        onClick={() => setActions([...actions, { type: "none" }])}
+      >
+        Add action
+      </Button>
+
+      <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+        Hold actions stay down until you release the button. Order matters:
+        press H before holding the left button, for example.
+      </p>
+    </StepSection>
   );
 }
 
@@ -561,7 +664,8 @@ export function MappingSheet({
     cooldownMs: 80,
     alsoScroll: false,
   });
-  const [action, setAction] = useState<Action>(defaultAction("shortcut"));
+  const [actions, setActions] = useState<Action[]>([defaultAction("shortcut")]);
+  const [captureAction, setCaptureAction] = useState(0);
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [captureTarget, setCaptureTarget] = useState<"button" | "keys" | null>(
@@ -581,7 +685,8 @@ export function MappingSheet({
     const source = mapping ?? newMapping(initialButton === undefined ? "x2" : initialButton);
     setButton(source.button);
     setTrigger(source.trigger);
-    setAction(source.action);
+    setActions(splitActions(source.action));
+    setCaptureAction(0);
     setWheel(source.wheel ?? { cooldownMs: 80, alsoScroll: false });
     setName(source.name ?? "");
     setEnabled(source.enabled);
@@ -596,20 +701,27 @@ export function MappingSheet({
         ? "keyboard"
         : null;
 
-  // Keyboard capture in this sheet always feeds the action's key combination;
-  // the trigger button is recorded through the mouse session.
+  // Keyboard capture in this sheet feeds the action row whose Record button
+  // started it; the trigger button is recorded through the mouse session.
   const applyKeys = (keys: string[]) => {
     const token = keys[keys.length - 1];
     if (!token) return;
-    if (action.type === "key") {
-      setAction({ type: "key", key: token });
-    } else if (
-      action.type === "shortcut" ||
-      action.type === "holdKeys" ||
-      action.type === "toggleKeys"
-    ) {
-      setAction({ ...action, keys });
-    }
+    setActions((current) =>
+      current.map((item, index) => {
+        if (index !== captureAction) return item;
+        if (item.type === "key") {
+          return { type: "key", key: token };
+        }
+        if (
+          item.type === "shortcut" ||
+          item.type === "holdKeys" ||
+          item.type === "toggleKeys"
+        ) {
+          return { ...item, keys };
+        }
+        return item;
+      }),
+    );
   };
 
   const capture = useCaptureSession(
@@ -618,8 +730,14 @@ export function MappingSheet({
     applyKeys,
   );
 
-  const toggleCapture = (target: "button" | "keys") => {
-    const next = captureTarget === target ? null : target;
+  const toggleCapture = (target: "button" | "keys", actionIndex = captureAction) => {
+    const activeHere =
+      captureTarget === target &&
+      (target !== "keys" || actionIndex === captureAction);
+    const next = activeHere ? null : target;
+    if (target === "keys" && actionIndex !== captureAction) {
+      setCaptureAction(actionIndex);
+    }
     if (next !== null) {
       // The Record button keeps focus and turns into Stop, so a Space or Enter
       // pressed before the hook is listening would end the session again.
@@ -657,15 +775,15 @@ export function MappingSheet({
     applyCaptured(event);
   };
 
-  const keyCapture: CaptureControl = {
-    recording: captureTarget === "keys",
+  const keyCaptureFor = (index: number): CaptureControl => ({
+    recording: captureTarget === "keys" && captureAction === index,
     ready: capture.ready,
     events: capture.events,
-    onToggle: () => toggleCapture("keys"),
-    showLog: lastTarget === "keys",
+    onToggle: () => toggleCapture("keys", index),
+    showLog: lastTarget === "keys" && captureAction === index,
     selectedSeq: appliedSeq,
     onPick: pickCaptured,
-  };
+  });
 
   useEffect(() => {
     if (manualPick) return;
@@ -675,7 +793,7 @@ export function MappingSheet({
     if (!selected || selected.seq <= appliedSeq) return;
     setAppliedSeq(selected.seq);
     applyCaptured(selected);
-  }, [capture.events, appliedSeq, manualPick, action, toast]);
+  }, [capture.events, appliedSeq, manualPick, captureAction, toast]);
 
   useEffect(() => {
     if (!capture.error) return;
@@ -719,6 +837,12 @@ export function MappingSheet({
 
   const handleSave = async () => {
     const isWheel = trigger.type === "wheel";
+    const action = combineActions(actions);
+    const listProblem = validateActionList(actions);
+    if (listProblem) {
+      setError(listProblem);
+      return;
+    }
     const draft: Mapping = {
       id: mapping?.id ?? "",
       name: name.trim() ? name.trim() : null,
@@ -753,6 +877,12 @@ export function MappingSheet({
 
   const testAction = async () => {
     const isWheel = trigger.type === "wheel";
+    const action = combineActions(actions);
+    const listProblem = validateActionList(actions);
+    if (listProblem) {
+      setError(listProblem);
+      return;
+    }
     const draft: Mapping = {
       id: mapping?.id ?? "test",
       name: name.trim() ? name.trim() : null,
@@ -786,6 +916,8 @@ export function MappingSheet({
       toast(errorMessage(caught), "error");
     }
   };
+
+  const previewAction = combineActions(actions);
 
   return (
     <Sheet
@@ -1028,10 +1160,10 @@ export function MappingSheet({
           )}
         </StepSection>
 
-        <ActionFields
-          action={action}
-          setAction={setAction}
-          capture={keyCapture}
+        <ActionsFields
+          actions={actions}
+          setActions={setActions}
+          captureFor={keyCaptureFor}
           newStepType={newStepType}
           setNewStepType={setNewStepType}
         />
@@ -1084,7 +1216,7 @@ export function MappingSheet({
             {buttonLabel(button)} · {triggerLabel(trigger)}
           </span>
           <ChevronRight className="size-3 shrink-0" />
-          <ActionPreview action={action} />
+          <ActionPreview action={previewAction} />
           <Button
             size="sm"
             variant="ghost"
@@ -1095,7 +1227,7 @@ export function MappingSheet({
           >
             Test
           </Button>
-          {action.type === "macro" && (
+          {previewAction.type === "macro" && (
             <Button
               size="sm"
               variant="ghost"
@@ -1328,7 +1460,8 @@ function ActionPreview({ action }: { action: Action }) {
     action.type === "media" ||
     action.type === "window" ||
     action.type === "toggleKeys" ||
-    action.type === "dragLock"
+    action.type === "dragLock" ||
+    action.type === "combined"
   ) {
     return <span>{actionLabel(action)}</span>;
   }

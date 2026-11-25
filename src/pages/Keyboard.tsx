@@ -20,14 +20,17 @@ import { ConfirmDialog } from "../components/Modal";
 import { Select } from "../components/Select";
 import { Sheet } from "../components/Sheet";
 import { Switch } from "../components/Switch";
-import { ActionFields } from "../components/MappingEditor";
+import { ActionsFields } from "../components/MappingEditor";
 import { useToast } from "../components/Toast";
 import { useCaptureSession } from "../hooks/useCaptureSession";
 import { api, errorMessage } from "../lib/api";
 import { cn } from "../lib/cn";
 import {
   actionLabel,
+  combineActions,
   keysLabel,
+  splitActions,
+  validateActionList,
 } from "../lib/format";
 import {
   newKeyMapping,
@@ -408,7 +411,10 @@ function KeyMappingSheet({
   const [source, setSource] = useState<string[]>([]);
   const [mode, setMode] = useState<"remap" | "action">("remap");
   const [target, setTarget] = useState<string[]>([]);
-  const [action, setAction] = useState<Action>({ type: "shortcut", keys: [] });
+  const [actions, setActions] = useState<Action[]>([
+    { type: "shortcut", keys: [] },
+  ]);
+  const [captureAction, setCaptureAction] = useState(0);
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [captureTarget, setCaptureTarget] = useState<
@@ -434,11 +440,12 @@ function KeyMappingSheet({
     setTarget(
       draft.behaviour.mode === "remap" ? draft.behaviour.target : [],
     );
-    setAction(
+    setActions(
       draft.behaviour.mode === "action"
-        ? draft.behaviour.action
-        : { type: "shortcut", keys: [] },
+        ? splitActions(draft.behaviour.action)
+        : [{ type: "shortcut", keys: [] }],
     );
+    setCaptureAction(0);
     setName(draft.name ?? "");
     setEnabled(draft.enabled);
     setError(null);
@@ -458,15 +465,22 @@ function KeyMappingSheet({
     } else if (target === "target") {
       setTarget(keys);
     } else if (target === "keys") {
-      if (action.type === "key") {
-        setAction({ type: "key", key: token });
-      } else if (
-        action.type === "shortcut" ||
-        action.type === "holdKeys" ||
-        action.type === "toggleKeys"
-      ) {
-        setAction({ ...action, keys });
-      }
+      setActions((current) =>
+        current.map((item, index) => {
+          if (index !== captureAction) return item;
+          if (item.type === "key") {
+            return { type: "key", key: token };
+          }
+          if (
+            item.type === "shortcut" ||
+            item.type === "holdKeys" ||
+            item.type === "toggleKeys"
+          ) {
+            return { ...item, keys };
+          }
+          return item;
+        }),
+      );
     }
   };
 
@@ -476,8 +490,17 @@ function KeyMappingSheet({
     applyKeys,
   );
 
-  const toggleCapture = (target: "source" | "target" | "keys") => {
-    const next = captureTarget === target ? null : target;
+  const toggleCapture = (
+    target: "source" | "target" | "keys",
+    actionIndex = captureAction,
+  ) => {
+    const activeHere =
+      captureTarget === target &&
+      (target !== "keys" || actionIndex === captureAction);
+    const next = activeHere ? null : target;
+    if (target === "keys" && actionIndex !== captureAction) {
+      setCaptureAction(actionIndex);
+    }
     if (next !== null) {
       // The Record button keeps focus and turns into Stop, so a Space or Enter
       // pressed before the hook is listening would end the session again.
@@ -508,12 +531,17 @@ function KeyMappingSheet({
 
   const captureControl = (
     target: "source" | "target" | "keys",
+    actionIndex = captureAction,
   ): CaptureControl => ({
-    recording: captureTarget === target,
+    recording:
+      captureTarget === target &&
+      (target !== "keys" || actionIndex === captureAction),
     ready: capture.ready,
     events: capture.events,
-    onToggle: () => toggleCapture(target),
-    showLog: lastTarget === target,
+    onToggle: () => toggleCapture(target, actionIndex),
+    showLog:
+      lastTarget === target &&
+      (target !== "keys" || actionIndex === captureAction),
     selectedSeq: appliedSeq,
     onPick: pickCaptured,
   });
@@ -526,7 +554,7 @@ function KeyMappingSheet({
     if (!selected || selected.seq <= appliedSeq) return;
     setAppliedSeq(selected.seq);
     applyCaptured(selected);
-  }, [capture.events, appliedSeq, manualPick, lastTarget, action]);
+  }, [capture.events, appliedSeq, manualPick, lastTarget, captureAction]);
 
   useEffect(() => {
     if (!capture.error) return;
@@ -556,6 +584,14 @@ function KeyMappingSheet({
     if (mode === "remap" && target.length === 0) {
       setError("Choose at least one target key.");
       return;
+    }
+    const action = combineActions(actions);
+    if (mode === "action") {
+      const actionError = validateActionList(actions);
+      if (actionError) {
+        setError(actionError);
+        return;
+      }
     }
     const draft: KeyMapping = {
       id: mapping?.id ?? "",
@@ -657,10 +693,10 @@ function KeyMappingSheet({
         </EditorSection>
 
         {mode === "action" && (
-          <ActionFields
-            action={action}
-            setAction={setAction}
-            capture={captureControl("keys")}
+          <ActionsFields
+            actions={actions}
+            setActions={setActions}
+            captureFor={(index) => captureControl("keys", index)}
             newStepType={newStepType}
             setNewStepType={setNewStepType}
           />

@@ -4,6 +4,50 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.5.0] — 2026-11-25
+
+Several actions per mapping, and Settings polish.
+
+### Added
+
+- **Multiple actions per mapping** — a trigger can now run **2–8 actions, in
+  order**, instead of being limited to one. The action editor lists the actions
+  with move-up/down and remove controls, and an **Add action** button.
+  - Hold-style actions (Hold keys, Hold mouse button) stay held until the
+    trigger is released, so a single button can hold a key *and* drag the mouse:
+    e.g. Middle button → *Hold keys* `H` + *Hold mouse button* Left for
+    Photoshop's hand tool.
+  - Non-hold actions fire immediately in list order; the first one can run
+    before a hold starts.
+  - Holds are released in reverse order on release, on app switch, on the
+    emergency stop and on disable, so nothing sticks.
+  - Combined actions work for mouse mappings and keyboard mappings, survive
+    import/export, and are covered by the launch-action import confirmation.
+  - The editor's **Test** button runs each action once.
+- **Collapsible Settings cards** — every Settings card is an accordion: the
+  header toggles it, the chevron rotates, and the whole header is clickable.
+- **Theme picker spacing** — the System/Light/Dark previews now have proper
+  padding and gaps inside their card.
+
+### Changed
+
+- Configuration schema is now **v5**. Existing v4 files load unchanged; there is
+  no data migration, only the new action format.
+- Action validation recurses into groups and reports the row number
+  (“Action 2 does nothing…”), and nested groups are flattened on load.
+
+### Fixed
+
+- Settings chevrons were decorative and slightly off-centre; they now point at
+  the open state and are vertically centred.
+- The Appearance preview cards touched the card edges.
+
+### Tests
+
+- 121 Rust tests, including combined-action sanitising and sustained/tap
+  engine behaviour, plus the existing keyboard, wheel, capture and config
+  coverage.
+
 ## [1.4.0] — 2026-11-25
 
 Keyboard remapping, standalone wheel triggers and a rebuilt recorder.

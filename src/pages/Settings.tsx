@@ -296,7 +296,7 @@ export function SettingsPage() {
           title="Appearance"
           description="A quiet interface that follows your preference."
         >
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-3 px-4 py-4 sm:grid-cols-3">
             {(
               [
                 { value: "system", label: "System", icon: Monitor },
@@ -857,19 +857,42 @@ function SettingCard({
   description: string;
   children: React.ReactNode;
 }) {
+  const [open, setOpen] = useState(true);
+  const contentId = `settings-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
   return (
     <section className="surface overflow-hidden rounded-2xl">
-      <div className="flex items-start gap-3 border-b border-zinc-100 px-4 py-3.5 dark:border-white/[0.055]">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls={contentId}
+        className={cn(
+          "focus-ring flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-zinc-50/70 dark:hover:bg-white/[0.03]",
+          open && "border-b border-zinc-100 dark:border-white/[0.055]",
+        )}
+      >
         <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-white/[0.06] dark:text-zinc-400">
           <Icon className="size-4" strokeWidth={1.7} />
         </div>
-        <div>
-          <h2 className="text-[13.5px] font-semibold">{title}</h2>
-          <p className="mt-0.5 text-[11.5px] text-secondary">{description}</p>
+        <div className="min-w-0 flex-1">
+          <span className="block text-[13.5px] font-semibold">{title}</span>
+          <span className="mt-0.5 block text-[11.5px] text-secondary">
+            {description}
+          </span>
         </div>
-        <ChevronRight className="ml-auto mt-1.5 size-4 text-zinc-300 dark:text-zinc-700" />
-      </div>
-      {children}
+        <ChevronRight
+          className={cn(
+            "size-4 shrink-0 text-zinc-300 transition-transform duration-200 dark:text-zinc-600",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && (
+        <div id={contentId} className="animate-fade">
+          {children}
+        </div>
+      )}
     </section>
   );
 }

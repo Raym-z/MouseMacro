@@ -31,6 +31,7 @@ export type Action =
   | { type: "window"; action: WindowAction }
   | { type: "toggleKeys"; keys: string[] }
   | { type: "dragLock"; button: MouseButton }
+  | { type: "combined"; actions: Action[] }
   | { type: "disable" }
   | { type: "none" };
 

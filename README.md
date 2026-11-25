@@ -57,6 +57,10 @@ runs locally: no telemetry, no network calls, no background services.
 - Media keys (play/pause, next, previous, volume, mute)
 - Window actions (minimize, maximize, restore, close, snap left/right)
 - Sticky **toggle keys** and **drag lock**
+- **Multiple actions per mapping** — add 2–8 actions to one trigger; they run
+  in order when it fires, and hold actions stay held until you release. For
+  example, Middle button → *Hold keys* `H` + *Hold mouse button* Left pans in
+  Photoshop with the hand tool.
 - Disable the button (consume it silently) or explicit "no action"
 
 ### Keyboard
@@ -211,7 +215,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 116 engine/config/hook/capture/service tests
+npm run test:rust   # 121 engine/config/hook/capture/service tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -251,7 +255,7 @@ atomically. Shape:
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "settings": {
     "enabled": true,
     "launchAtStartup": false,
@@ -297,6 +301,20 @@ atomically. Shape:
           "action": { "type": "shortcut", "keys": ["ctrl", "equal"] },
           "enabled": true,
           "wheel": { "cooldownMs": 80, "alsoScroll": false }
+        },
+        {
+          "id": "…",
+          "name": "Pan",
+          "button": "middle",
+          "trigger": { "type": "singleClick" },
+          "action": {
+            "type": "combined",
+            "actions": [
+              { "type": "holdKeys", "keys": ["h"] },
+              { "type": "mouseHold", "button": "left" }
+            ]
+          },
+          "enabled": true
         }
       ],
       "keyMappings": [
@@ -377,13 +395,13 @@ src-tauri/src/
 
 ## Roadmap
 
-1.4 added opt-in keyboard remapping, standalone wheel triggers and the rebuilt
-recorder. The remaining input-suite work is:
+1.5 added multiple actions per mapping and the Settings polish. The remaining
+input-suite work is:
 
-1. **Pointer and keyboard timing** (1.5) — Windows pointer speed and
+1. **Pointer and keyboard timing** (1.6) — Windows pointer speed and
    acceleration, primary button, double-click time, and keyboard repeat
    delay/rate, with snapshot/restore.
-2. **Keyboard follow-ups** (1.5) — scan-code mode for non-US layouts, F12 as a
+2. **Keyboard follow-ups** (1.6) — scan-code mode for non-US layouts, F12 as a
    mouse modifier, and an opt-in keyboard diagnostics list.
 
 OS-level changes will snapshot and restore original Windows values, with explicit

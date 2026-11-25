@@ -67,6 +67,9 @@ impl CaptureMode {
 enum HeldSynthetic {
     Keys(Vec<String>),
     Mouse(MouseButton),
+    /// Several holds started together by a combined action. Released in
+    /// reverse order so tools that changed on press unwind cleanly.
+    Group(Vec<HeldSynthetic>),
 }
 
 impl HeldSynthetic {
@@ -74,6 +77,28 @@ impl HeldSynthetic {
         match self {
             HeldSynthetic::Keys(keys) => combo_identity(keys),
             HeldSynthetic::Mouse(button) => format!("mouse:{}", button.label()),
+            HeldSynthetic::Group(items) => items
+                .iter()
+                .map(HeldSynthetic::identity)
+                .collect::<Vec<_>>()
+                .join("|"),
+        }
+    }
+
+    fn release(self) -> Result<(), String> {
+        match self {
+            HeldSynthetic::Keys(keys) => simulate::release_keys(&keys),
+            HeldSynthetic::Mouse(button) => simulate::release_button(button),
+            HeldSynthetic::Group(items) => {
+                let mut result = Ok(());
+                for item in items.into_iter().rev() {
+                    let next = item.release();
+                    if result.is_ok() {
+                        result = next;
+                    }
+                }
+                result
+            }
         }
     }
 }
@@ -130,6 +155,14 @@ impl Executor {
             Action::DragLock { button } => {
                 self.toggle(&format!("mouse:{}", button.label()), HeldSynthetic::Mouse(*button))
             }
+            Action::Combined { actions } => {
+                // Give each child its own key so two macros in one group do not
+                // cancel each other.
+                for (index, child) in actions.iter().enumerate() {
+                    self.run(&format!("{key}#{index}"), child);
+                }
+                Ok(())
+            }
             Action::Disable | Action::None => Ok(()),
         };
         self.finish(result);
@@ -147,11 +180,12 @@ impl Executor {
             }
         };
         match held {
-            Some(HeldSynthetic::Keys(keys)) => simulate::release_keys(&keys),
-            Some(HeldSynthetic::Mouse(button)) => simulate::release_button(button),
+            Some(held) => held.release(),
             None => match state {
                 HeldSynthetic::Keys(keys) => simulate::press_keys(&keys),
                 HeldSynthetic::Mouse(button) => simulate::press_button(button),
+                // Toggle actions never store a group; nothing to press.
+                HeldSynthetic::Group(_) => Ok(()),
             },
         }
     }
@@ -171,6 +205,42 @@ impl Executor {
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(token.to_string(), HeldSynthetic::Mouse(*button));
             }),
+            Action::Combined { actions } => {
+                // Non-hold children run now, in order, so a key tap happens
+                // before the mouse button goes down (H before the pan drag).
+                let key = token.split(':').nth(1).unwrap_or("test");
+                let mut held: Vec<HeldSynthetic> = Vec::new();
+                let mut result = Ok(());
+                for (index, child) in actions.iter().enumerate() {
+                    let next = match child {
+                        Action::HoldKeys { keys } => simulate::press_keys(keys).map(|_| {
+                            held.push(HeldSynthetic::Keys(keys.clone()));
+                        }),
+                        Action::MouseHold { button } => {
+                            simulate::press_button(*button).map(|_| {
+                                held.push(HeldSynthetic::Mouse(*button));
+                            })
+                        }
+                        other => {
+                            self.run(&format!("{key}#{index}"), other);
+                            Ok(())
+                        }
+                    };
+                    if let Err(error) = next {
+                        result = Err(error);
+                        break;
+                    }
+                }
+                if !held.is_empty() {
+                    // Store even after a failure so the pressed keys can be
+                    // released by Stop, the panic hotkey or an app switch.
+                    self.holds
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(token.to_string(), HeldSynthetic::Group(held));
+                }
+                result
+            }
             other => {
                 // Not a sustained action: execute it and do not keep a hold.
                 let key = token.split(':').nth(1).unwrap_or("test");
@@ -187,8 +257,7 @@ impl Executor {
             holds.remove(token)
         };
         let result = match held {
-            Some(HeldSynthetic::Keys(keys)) => simulate::release_keys(&keys),
-            Some(HeldSynthetic::Mouse(button)) => simulate::release_button(button),
+            Some(held) => held.release(),
             None => Ok(()),
         };
         self.finish(result);
@@ -205,11 +274,7 @@ impl Executor {
             toggles.drain().map(|(_, held)| held).collect()
         };
         for held in held.into_iter().chain(toggles) {
-            let result = match held {
-                HeldSynthetic::Keys(keys) => simulate::release_keys(&keys),
-                HeldSynthetic::Mouse(button) => simulate::release_button(button),
-            };
-            self.finish(result);
+            self.finish(held.release());
         }
     }
 
@@ -240,11 +305,7 @@ impl Executor {
                 .collect()
         };
         for held in held {
-            let result = match held {
-                HeldSynthetic::Keys(keys) => simulate::release_keys(&keys),
-                HeldSynthetic::Mouse(button) => simulate::release_button(button),
-            };
-            self.finish(result);
+            self.finish(held.release());
         }
     }
 

@@ -1281,6 +1281,53 @@ mod tests {
     }
 
     #[test]
+    fn combined_sustained_action_holds_until_release() {
+        let combined = Action::Combined {
+            actions: vec![
+                shortcut(&["h"]),
+                Action::MouseHold {
+                    button: MouseButton::Left,
+                },
+            ],
+        };
+        let mut engine = engine(vec![mapping(
+            MouseButton::Middle,
+            Trigger::SingleClick,
+            combined.clone(),
+        )]);
+        let press = down(&mut engine, MouseButton::Middle, 1_000);
+        assert!(matches!(
+            press.effects.as_slice(),
+            [Effect::StartHold { action, .. }] if action == &combined
+        ));
+        let release = up(&mut engine, MouseButton::Middle, 1_100);
+        assert!(matches!(
+            release.effects.as_slice(),
+            [Effect::ReleaseHold { .. }]
+        ));
+    }
+
+    #[test]
+    fn combined_tap_only_action_runs_once() {
+        let combined = Action::Combined {
+            actions: vec![
+                shortcut(&["h"]),
+                Action::MouseClick {
+                    button: MouseButton::Left,
+                },
+            ],
+        };
+        let mut engine = engine(vec![mapping(
+            MouseButton::Middle,
+            Trigger::LongPress,
+            combined.clone(),
+        )]);
+        down(&mut engine, MouseButton::Middle, 1_000);
+        let fired = tick(&mut engine, 1_400);
+        assert_eq!(runs(&fired), vec![&combined]);
+    }
+
+    #[test]
     fn cancel_all_releases_every_hold() {
         let mut engine = engine(vec![mapping(
             MouseButton::X2,
