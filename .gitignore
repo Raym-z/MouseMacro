@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+*.tsbuildinfo
+
+# Rust build output
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Packaged installers / portable builds produced locally
+release/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
