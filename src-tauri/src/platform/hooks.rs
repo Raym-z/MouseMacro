@@ -4,11 +4,13 @@
 //! is required for `WH_MOUSE_LL` / `WH_KEYBOARD_LL`. Every injected event carries
 //! [`INJECTION_TAG`] and is ignored, preventing feedback loops.
 
+use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 
+use serde::Serialize;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -38,6 +40,68 @@ const LLMHF_INJECTED: u32 = 0x0000_0001;
 const LLMHF_LOWER_IL_INJECTED: u32 = 0x0000_0002;
 const LLKHF_INJECTED: u32 = 0x0000_0010;
 
+/// One mouse event as seen by the hook, kept for the in-app diagnostics view.
+/// This records events *before* filtering so "why did nothing happen?" can be
+/// answered without guessing.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputSample {
+    pub age_ms: u64,
+    pub kind: String,
+    pub direction: Option<String>,
+    pub button: Option<String>,
+    pub axis: Option<String>,
+    pub delta: i32,
+    pub injected: bool,
+    pub own_injection: bool,
+    pub accepted: bool,
+    pub matched: bool,
+    #[serde(skip)]
+    at_ms: u64,
+}
+
+const MAX_SAMPLES: usize = 40;
+static SAMPLES: OnceLock<Mutex<VecDeque<InputSample>>> = OnceLock::new();
+
+fn samples() -> &'static Mutex<VecDeque<InputSample>> {
+    SAMPLES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn push_sample(mut sample: InputSample) {
+    sample.at_ms = crate::platform::service::now_ms();
+    let mut guard = samples().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= MAX_SAMPLES {
+        guard.pop_front();
+    }
+    guard.push_back(sample);
+}
+
+fn mark_last_matched() {
+    let mut guard = samples().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = guard.back_mut() {
+        last.matched = true;
+    }
+}
+
+/// Newest-first snapshot for the UI, with ages resolved at read time.
+pub fn recent_samples() -> Vec<InputSample> {
+    let now = crate::platform::service::now_ms();
+    let guard = samples().lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .iter()
+        .rev()
+        .map(|sample| InputSample {
+            age_ms: now.saturating_sub(sample.at_ms),
+            ..sample.clone()
+        })
+        .collect()
+}
+
+/// Drops recorded events so a new diagnostics session starts empty.
+pub fn clear_samples() {
+    samples().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// Debug builds accept other tools' injected input so the full capture and
 /// remapping pipeline can be tested end to end. Set
 /// `MOUSEMACRO_DEBUG_IGNORE_INJECTED=1` to restore the production behaviour.
@@ -54,8 +118,17 @@ fn allow_external_injection() -> bool {
     }
 }
 
-fn should_ignore_injected(flags_injected: bool, extra_info: usize) -> bool {
-    extra_info == INJECTION_TAG || (flags_injected && !allow_external_injection())
+fn should_ignore_injected(flags_injected: bool, extra_info: usize, external_allowed: bool) -> bool {
+    ignore_decision(flags_injected, extra_info, allow_external_injection() || external_allowed)
+}
+
+/// Pure decision helper so the filtering rules stay testable.
+fn ignore_decision(flags_injected: bool, extra_info: usize, external_allowed: bool) -> bool {
+    // Never react to our own synthetic input, even when external input is allowed.
+    if extra_info == INJECTION_TAG {
+        return true;
+    }
+    flags_injected && !external_allowed
 }
 
 struct Startup {
@@ -254,9 +327,7 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
         return false;
     };
     let injected = info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0;
-    if should_ignore_injected(injected, info.dwExtraInfo) {
-        return false;
-    }
+    let own_injection = info.dwExtraInfo == INJECTION_TAG;
 
     let input = match message {
         WM_LBUTTONDOWN => MouseInput::Down(MouseButton::Left),
@@ -300,7 +371,60 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
         _ => return false,
     };
 
-    service.handle_mouse(input)
+    let ignored = should_ignore_injected(
+        injected,
+        info.dwExtraInfo,
+        service.accepts_external_injection(),
+    );
+
+    let (kind, direction, button) = match &input {
+        MouseInput::Down(button) => ("down", None, Some(button.label())),
+        MouseInput::Up(button) => ("up", None, Some(button.label())),
+        MouseInput::Wheel(direction) => (
+            "wheel",
+            Some(match direction {
+                ScrollDirection::Up => "up",
+                ScrollDirection::Down => "down",
+                ScrollDirection::Left => "left",
+                ScrollDirection::Right => "right",
+            }),
+            None,
+        ),
+    };
+    let wheel_delta = if matches!(input, MouseInput::Wheel(_)) {
+        (((info.mouseData >> 16) & 0xffff) as u16) as i16 as i32
+    } else {
+        0
+    };
+    push_sample(InputSample {
+        age_ms: 0,
+        kind: kind.to_string(),
+        direction: direction.map(str::to_string),
+        button: button.map(str::to_string),
+        axis: matches!(input, MouseInput::Wheel(_)).then(|| {
+            if message == WM_MOUSEWHEEL {
+                "vertical".to_string()
+            } else {
+                "horizontal".to_string()
+            }
+        }),
+        delta: wheel_delta,
+        injected,
+        own_injection,
+        accepted: !ignored,
+        matched: false,
+        at_ms: 0,
+    });
+
+    if ignored {
+        return false;
+    }
+
+    let matched = service.handle_mouse(input);
+    if matched {
+        mark_last_matched();
+    }
+    matched
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -337,9 +461,38 @@ unsafe fn handle_keyboard_message(message: u32, lparam: LPARAM) -> bool {
         return false;
     };
     let injected = info.flags.0 & LLKHF_INJECTED != 0;
-    if should_ignore_injected(injected, info.dwExtraInfo) {
+    if should_ignore_injected(
+        injected,
+        info.dwExtraInfo,
+        service.accepts_external_injection(),
+    ) {
         return false;
     }
     let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     service.handle_key(info.vkCode as u16, is_down)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ignore_decision;
+    use crate::config::model::INJECTION_TAG;
+
+    #[test]
+    fn own_injections_are_always_ignored() {
+        assert!(ignore_decision(true, INJECTION_TAG, true));
+        assert!(ignore_decision(false, INJECTION_TAG, true));
+        assert!(ignore_decision(true, INJECTION_TAG, false));
+    }
+
+    #[test]
+    fn physical_input_is_always_accepted() {
+        assert!(!ignore_decision(false, 0, false));
+        assert!(!ignore_decision(false, 0, true));
+    }
+
+    #[test]
+    fn external_injection_follows_the_setting() {
+        assert!(ignore_decision(true, 0, false));
+        assert!(!ignore_decision(true, 0, true));
+    }
 }

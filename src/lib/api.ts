@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Mapping, CaptureMode, Settings, Snapshot } from "./types";
+import type {
+  Mapping,
+  CaptureMode,
+  InputSample,
+  Settings,
+  Snapshot,
+} from "./types";
 
 export const api = {
   getSnapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -39,11 +45,14 @@ export const api = {
   exportProfile: (profileId: string, path: string) =>
     invoke<string>("export_profile", { profileId, path }),
   resetConfig: () => invoke<Snapshot>("reset_config"),
+  reloadConfig: () => invoke<Snapshot>("reload_config"),
   setCaptureMode: (mode: CaptureMode) =>
     invoke<Snapshot>("set_capture_mode", { mode }),
   clearWarnings: () => invoke<Snapshot>("clear_warnings"),
   openConfigFolder: () => invoke<void>("open_config_folder"),
   relaunchElevated: () => invoke<void>("relaunch_elevated"),
+  getInputDiagnostics: () => invoke<InputSample[]>("get_input_diagnostics"),
+  clearInputDiagnostics: () => invoke<void>("clear_input_diagnostics"),
 };
 
 export function errorMessage(error: unknown): string {

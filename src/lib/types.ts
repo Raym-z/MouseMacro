@@ -52,7 +52,22 @@ export interface Settings {
   theme: Theme;
   longPressMs: number;
   doubleClickMs: number;
+  /** Accept mouse/keyboard events synthesized by other input tools. */
+  processInjectedInput: boolean;
   rulePriority: RuleCategory[];
+}
+
+export interface InputSample {
+  ageMs: number;
+  kind: "wheel" | "down" | "up";
+  direction: string | null;
+  button: string | null;
+  axis: "vertical" | "horizontal" | null;
+  delta: number;
+  injected: boolean;
+  ownInjection: boolean;
+  accepted: boolean;
+  matched: boolean;
 }
 
 export interface AppConfig {

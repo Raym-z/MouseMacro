@@ -70,6 +70,10 @@ touching Windows APIs:
 - Launch on Windows startup (registry reconciled with config at boot).
 - Start minimized, close-to-tray, light/dark/system themes.
 - Optional relaunch as administrator for elevated applications.
+- **Input diagnostics** in Settings: press Start, use the mouse, press Stop — the
+  last mouse events are listed with axis, delta and whether they were filtered
+  as synthetic. Also an opt-in to process input synthesized by other utilities
+  (mouse vendor software, touchpad drivers, remote desktop).
 
 ### Safety
 - Atomic config writes with a timestamped backup of unreadable files.
@@ -130,7 +134,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 47 engine/config/hook tests
+npm run test:rust   # 50 engine/config/hook tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -223,6 +227,8 @@ src-tauri/src/
 | No window after launch | It starts in the tray (`startMinimized`). Use the tray icon, or run the exe again to show the existing instance. Disable *Start minimized* in Settings. |
 | Closing the window doesn't quit | *Close to tray* is on. Use tray → Exit. |
 | Shortcut recording sees nothing | Some games/secure windows block keyboard hooks. Use **Choose** in the action section — no hook required. |
+| Scroll gestures do nothing | Settings → **Input diagnostics**: if wheel rows say `synthetic`, enable *Process input from other input tools*. If they say `horizontal`, the device is a thumb/tilt wheel — map `left`/`right` triggers. |
+| Hand-edited config.json has no effect | Settings → **Reload from disk** (or restart). The running app keeps its in-memory copy. |
 | Shortcuts don't work inside a game | If the game runs elevated, relaunch MouseMacro via *Settings → Run as administrator*. |
 | SmartScreen on another PC | The build is unsigned: *More info → Run anyway*. |
 

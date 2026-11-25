@@ -124,6 +124,17 @@ impl AppState {
         self.commit(config, false)
     }
 
+    /// Re-reads `config.json` from disk. Intended for people who edit the file by
+    /// hand: without this the running app keeps its in-memory copy.
+    pub fn reload(&self) -> Result<Snapshot, String> {
+        let loaded = self.store.load();
+        {
+            let mut warning = self.load_warning.lock().unwrap_or_else(|e| e.into_inner());
+            *warning = loaded.warning;
+        }
+        self.commit(loaded.config, true)
+    }
+
     pub fn set_capture_mode(&self, mode: CaptureMode) -> Result<Snapshot, String> {
         self.engine.set_capture_mode(mode)?;
         Ok(self.snapshot())

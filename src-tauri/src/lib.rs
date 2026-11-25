@@ -132,12 +132,15 @@ pub fn run() {
             commands::import_profile,
             commands::export_profile,
             commands::reset_config,
+            commands::reload_config,
             commands::set_capture_mode,
             commands::clear_warnings,
             commands::dismiss_banner,
             commands::open_config_folder,
             commands::relaunch_elevated,
             commands::debug_hook_stats,
+            commands::get_input_diagnostics,
+            commands::clear_input_diagnostics,
         ]);
 
     let app = builder

@@ -13,7 +13,7 @@ use crate::config::model::{
 use crate::engine::{keys, Effect, EngineConfig, InputEngine, InputEvent};
 use crate::platform::simulate;
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
@@ -156,6 +156,7 @@ pub struct EngineService {
     executor: Executor,
     app: AppHandle,
     capture: AtomicU8,
+    accept_external_injection: AtomicBool,
     hooks_active: AtomicBool,
     hook_warning: Mutex<Option<String>>,
 }
@@ -170,6 +171,9 @@ impl EngineService {
             executor: Executor::default(),
             app,
             capture: AtomicU8::new(CaptureMode::None as u8),
+            accept_external_injection: AtomicBool::new(
+                config.settings.process_injected_input,
+            ),
             hooks_active: AtomicBool::new(false),
             hook_warning: Mutex::new(None),
         });
@@ -212,12 +216,23 @@ impl EngineService {
     }
 
     pub fn reconfigure(&self, config: &AppConfig) {
+        self.accept_external_injection.store(
+            config.settings.process_injected_input,
+            Ordering::SeqCst,
+        );
         let effects = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.engine.reconfigure(EngineConfig::from_app(config))
         };
         self.cv.notify_all();
         self.execute(effects);
+    }
+
+    /// Whether input synthesized by *other* tools (mouse utilities, touchpad
+    /// drivers, remote desktop) should be processed. Our own injections are
+    /// always ignored through [`crate::config::model::INJECTION_TAG`].
+    pub fn accepts_external_injection(&self) -> bool {
+        self.accept_external_injection.load(Ordering::SeqCst)
     }
 
     pub fn release_all(&self) {

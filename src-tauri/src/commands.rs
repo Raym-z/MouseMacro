@@ -4,6 +4,7 @@ use tauri::State;
 
 use crate::config::model::{Mapping, Settings};
 use crate::platform::elevation;
+use crate::platform::hooks::{self, InputSample};
 use crate::platform::service::CaptureMode;
 use crate::state::{AppState, Snapshot};
 
@@ -126,6 +127,11 @@ pub fn reset_config(state: State<'_, AppState>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
+pub fn reload_config(state: State<'_, AppState>) -> Result<Snapshot, String> {
+    state.reload()
+}
+
+#[tauri::command]
 pub fn set_capture_mode(state: State<'_, AppState>, mode: String) -> Result<Snapshot, String> {
     state.set_capture_mode(CaptureMode::from_str(&mode))
 }
@@ -164,4 +170,17 @@ pub fn dismiss_banner(state: State<'_, AppState>) -> Snapshot {
 #[tauri::command]
 pub fn debug_hook_stats() -> (u64, u64, i64, i64) {
     crate::platform::hooks::callback_stats()
+}
+
+/// Recent mouse events exactly as the low-level hook saw them, newest first.
+/// Includes events that were filtered (synthetic input) so the diagnostics view
+/// can explain why a mapping did not fire.
+#[tauri::command]
+pub fn get_input_diagnostics() -> Vec<InputSample> {
+    hooks::recent_samples()
+}
+
+#[tauri::command]
+pub fn clear_input_diagnostics() {
+    hooks::clear_samples()
 }

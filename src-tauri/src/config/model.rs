@@ -152,6 +152,7 @@ pub struct Settings {
     pub theme: Theme,
     pub long_press_ms: u64,
     pub double_click_ms: u64,
+    pub process_injected_input: bool,
     pub rule_priority: Vec<RuleCategory>,
 }
 
@@ -165,6 +166,7 @@ impl Default for Settings {
             theme: Theme::System,
             long_press_ms: 400,
             double_click_ms: 280,
+            process_injected_input: false,
             rule_priority: RuleCategory::all(),
         }
     }

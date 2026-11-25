@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Activity,
   ArrowDown,
   ArrowUp,
   ChevronRight,
@@ -9,6 +10,7 @@ import {
   Monitor,
   Moon,
   Palette,
+  RefreshCw,
   RotateCcw,
   Settings2,
   ShieldAlert,
@@ -27,6 +29,7 @@ import { Select } from "../components/Select";
 import { Badge } from "../components/Badge";
 import { Callout } from "../components/Callout";
 import { ConfirmDialog } from "../components/Modal";
+import { InputDiagnostics } from "../components/InputDiagnostics";
 import { api, errorMessage } from "../lib/api";
 import {
   RULE_CATEGORY_HINT,
@@ -50,6 +53,7 @@ export function SettingsPage() {
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [reloading, setReloading] = useState(false);
 
   if (!snapshot) return null;
   const settings = snapshot.config.settings;
@@ -112,6 +116,15 @@ export function SettingsPage() {
 
   const openConfigFolder = async () => {
     await run(() => api.openConfigFolder());
+  };
+
+  const reloadConfiguration = async () => {
+    setReloading(true);
+    await runSnapshot(
+      () => api.reloadConfig(),
+      "Configuration reloaded from disk",
+    );
+    setReloading(false);
   };
 
   const restartElevated = async () => {
@@ -422,6 +435,28 @@ export function SettingsPage() {
         </SettingCard>
 
         <SettingCard
+          icon={Activity}
+          title="Input diagnostics"
+          description="Verify what the input hook really receives. Use this when a mapping does not fire."
+        >
+          <SettingRow
+            title="Process input from other input tools"
+            description="Mouse utilities, touchpad drivers and remote desktop synthesize events. Enable this if scrolling or side buttons from those tools never reach MouseMacro. MouseMacro's own synthetic input is always ignored."
+            control={
+              <Switch
+                checked={settings.processInjectedInput}
+                disabled={saving}
+                onChange={(value) => save({ processInjectedInput: value })}
+                label="Process input from other input tools"
+              />
+            }
+          />
+          <div className="px-4 pb-4 pt-3">
+            <InputDiagnostics />
+          </div>
+        </SettingCard>
+
+        <SettingCard
           icon={FolderOpen}
           title="Configuration & maintenance"
           description="Local, portable JSON storage. Nothing leaves your machine."
@@ -449,6 +484,22 @@ export function SettingsPage() {
               the file cannot be parsed.
             </p>
           </div>
+
+          <SettingRow
+            title="Reload from disk"
+            description="Pick up hand-edits to config.json without restarting. The file is re-read and normalised."
+            control={
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<RefreshCw />}
+                loading={reloading}
+                onClick={reloadConfiguration}
+              >
+                Reload
+              </Button>
+            }
+          />
 
           <SettingRow
             title="Run as administrator"
