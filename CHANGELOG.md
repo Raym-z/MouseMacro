@@ -4,6 +4,41 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.3.0] — 2026-11-25
+
+Macros, richer actions and real scroll control.
+
+### Added
+
+- **Macros** — ordered action sequences with tap/hold/release keys, waits, mouse
+  clicks and holds, scrolling and typed text. Macros support a repeat count with
+  an interval, or toggle mode where pressing the same button again stops the run.
+  Steps can be reordered, duplicated, delayed, and tested from the editor.
+- **New action types** — launch a program, file, folder or URL; type Unicode text
+  into the focused window; media keys; minimize/maximize/restore/close and
+  snap-left/right window actions; sticky toggle keys; and a drag lock.
+- **Scroll tab** — invert vertical or horizontal scrolling, swap axes for drivers
+  that report the wrong one, send 1–5 notches per physical notch, and optional
+  time-based acceleration. Per-application overrides keep a game on normal
+  scrolling while the desktop stays inverted.
+- **Import safety** — profiles containing launch actions show every target for
+  confirmation before they are saved.
+
+### Changed
+
+- Configuration schema is now **v3**. Existing v2 files migrate automatically;
+  wheel handling, macros and the new action types receive defaults.
+- Macros run on their own thread, are cancelled by the emergency stop, the editor
+  Stop button, a toggle press or an app switch, and release every key and button
+  they hold.
+- Physical wheel events are only transformed when the setting differs from
+  pass-through; MouseMacro's own injected scroll is never remapped.
+
+### Tests
+
+- 87 Rust tests, including scroll transforms, per-app scroll precedence, macro
+  step sanitation and the existing engine/layer/exception coverage.
+
 ## [1.2.0] — 2026-11-25
 
 Mappings become context-aware, repeatable and safer to leave running.

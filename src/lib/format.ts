@@ -1,11 +1,14 @@
 import type {
   Action,
+  MacroStep,
   Mapping,
   MouseButton,
   RuleCategory,
   ScrollDirection,
   Trigger,
+  WindowAction,
 } from "./types";
+import { WINDOW_ACTIONS } from "./types";
 
 const BUTTON_LABEL: Record<MouseButton, string> = {
   left: "Left",
@@ -164,11 +167,60 @@ export function actionLabel(action: Action): string {
       return `Hold ${buttonName(action.button)}`;
     case "scroll":
       return `Scroll ${action.direction} ×${action.amount}`;
+    case "macro": {
+      const count = action.steps.length;
+      const steps = `${count} step${count === 1 ? "" : "s"}`;
+      const repeat = action.repeat > 1 ? ` ×${action.repeat}` : "";
+      return `Macro · ${steps}${repeat}`;
+    }
+    case "launch":
+      return `Open ${truncate(action.target, 42)}`;
+    case "typeText":
+      return `Type “${truncate(action.text, 32)}”`;
+    case "media":
+      return keyLabel(action.key);
+    case "window":
+      return windowActionLabel(action.action);
+    case "toggleKeys":
+      return `Toggle ${keysLabel(action.keys)}`;
+    case "dragLock":
+      return `Toggle hold ${buttonName(action.button)}`;
     case "disable":
       return "Do nothing (disabled)";
     case "none":
       return "No action";
   }
+}
+
+export function windowActionLabel(action: WindowAction): string {
+  return WINDOW_ACTIONS.find((entry) => entry.value === action)?.label ?? action;
+}
+
+export function macroStepLabel(step: MacroStep): string {
+  switch (step.type) {
+    case "tapKeys":
+      return `Tap ${keysLabel(step.keys)}`;
+    case "holdKeys":
+      return `Hold ${keysLabel(step.keys)}`;
+    case "releaseKeys":
+      return `Release ${keysLabel(step.keys)}`;
+    case "wait":
+      return `Wait ${step.delayMs} ms`;
+    case "mouseClick":
+      return `Click ${buttonName(step.button)}`;
+    case "mouseHold":
+      return `Hold ${buttonName(step.button)}`;
+    case "mouseRelease":
+      return `Release ${buttonName(step.button)}`;
+    case "scroll":
+      return `Scroll ${step.direction} ×${step.amount}`;
+    case "typeText":
+      return `Type “${truncate(step.text, 28)}”`;
+  }
+}
+
+function truncate(value: string, length: number): string {
+  return value.length > length ? `${value.slice(0, length - 1)}…` : value;
 }
 
 export function actionKeys(action: Action): string[] | null {
@@ -191,6 +243,20 @@ export function actionTypeLabel(action: Action): string {
       return "Mouse button hold";
     case "scroll":
       return "Scroll";
+    case "macro":
+      return "Macro";
+    case "launch":
+      return "Launch";
+    case "typeText":
+      return "Type text";
+    case "media":
+      return "Media key";
+    case "window":
+      return "Window action";
+    case "toggleKeys":
+      return "Toggle keys";
+    case "dragLock":
+      return "Drag lock";
     case "disable":
       return "Disable button";
     case "none":
@@ -308,6 +374,52 @@ export function validateMapping(mapping: Mapping): string | null {
   }
   if (action.type === "scroll" && (action.amount < 1 || action.amount > 50)) {
     return "Scroll amount must be between 1 and 50.";
+  }
+  if (action.type === "macro") {
+    if (action.steps.length === 0) {
+      return "Add at least one step to the macro.";
+    }
+    if (action.steps.length > 40) {
+      return "A macro can contain at most 40 steps.";
+    }
+    if (action.repeat < 1 || action.repeat > 100) {
+      return "Macro repeat must be between 1 and 100.";
+    }
+    if (action.intervalMs < 0 || action.intervalMs > 10_000) {
+      return "The repeat interval can be at most 10000 ms.";
+    }
+    for (const step of action.steps) {
+      if (
+        (step.type === "tapKeys" ||
+          step.type === "holdKeys" ||
+          step.type === "releaseKeys") &&
+        step.keys.length === 0
+      ) {
+        return "Every key step needs at least one key.";
+      }
+      if (step.type === "typeText" && !step.text) {
+        return "Every text step needs some text.";
+      }
+      if (step.delayMs < 0 || step.delayMs > 60_000) {
+        return "Step delays must be between 0 and 60000 ms.";
+      }
+    }
+    const total =
+      action.steps.reduce((sum, step) => sum + step.delayMs, 0) *
+        action.repeat +
+      action.intervalMs * Math.max(0, action.repeat - 1);
+    if (total > 120_000) {
+      return "This macro would run for more than two minutes. Shorten it.";
+    }
+  }
+  if (action.type === "launch" && !action.target.trim()) {
+    return "Enter a program, file or URL to launch.";
+  }
+  if (action.type === "typeText" && !action.text) {
+    return "Enter the text to type.";
+  }
+  if (action.type === "toggleKeys" && action.keys.length === 0) {
+    return "Choose the keys to toggle.";
   }
   if (mapping.name && mapping.name.length > 60) {
     return "Mapping labels can be at most 60 characters.";

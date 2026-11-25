@@ -44,6 +44,7 @@ const VIEWS: View[] = [
   "layers",
   "profiles",
   "exceptions",
+  "scroll",
   "settings",
   "about",
 ];

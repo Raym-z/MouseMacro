@@ -34,6 +34,11 @@ export function ProfilesPage() {
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<{
+    path: string;
+    launches: string[];
+  } | null>(null);
+  const [importing, setImporting] = useState(false);
 
   if (!snapshot) return null;
   const { config } = snapshot;
@@ -127,13 +132,29 @@ export function ProfilesPage() {
         filters: [{ name: "MouseMacro profile", extensions: ["json"] }],
       });
       if (typeof path !== "string") return;
+      const launches = await api.inspectProfileImport(path);
+      if (launches.length > 0) {
+        setPendingImport({ path, launches });
+        return;
+      }
       await runSnapshot(
-        () => api.importProfile(path),
+        () => api.importProfile(path, false),
         "Profile imported and activated",
       );
     } catch (error) {
       toast(errorMessage(error), "error");
     }
+  };
+
+  const confirmImport = async () => {
+    if (!pendingImport) return;
+    setImporting(true);
+    const result = await runSnapshot(
+      () => api.importProfile(pendingImport.path, true),
+      "Profile imported and activated",
+    );
+    setImporting(false);
+    if (result) setPendingImport(null);
   };
 
   return (
@@ -360,6 +381,42 @@ export function ProfilesPage() {
           onSubmit={renameProfile}
           autoFocus
         />
+      </Modal>
+
+      <Modal
+        open={pendingImport !== null}
+        onClose={() => setPendingImport(null)}
+        title="This profile can launch programs"
+        description="Imported profiles can open programs, files or URLs. Review every target before allowing the import."
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPendingImport(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={confirmImport}
+              loading={importing}
+            >
+              Import anyway
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          {pendingImport?.launches.map((target, index) => (
+            <div
+              key={`${target}-${index}`}
+              className="rounded-lg border border-zinc-200/80 bg-zinc-50 px-3 py-2 font-mono text-[11.5px] break-all dark:border-white/[0.07] dark:bg-white/[0.03]"
+            >
+              {target}
+            </div>
+          ))}
+        </div>
+        <Callout tone="warning" className="mt-3">
+          Only import profiles from sources you trust. A launch target runs with
+          your user account when its mapping fires.
+        </Callout>
       </Modal>
 
       <ConfirmDialog

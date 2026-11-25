@@ -8,6 +8,7 @@ import { MappingsPage } from "./pages/Mappings";
 import { LayersPage } from "./pages/Layers";
 import { ProfilesPage } from "./pages/Profiles";
 import { ExceptionsPage } from "./pages/Exceptions";
+import { ScrollPage } from "./pages/Scroll";
 import { SettingsPage } from "./pages/Settings";
 import { AboutPage } from "./pages/About";
 import { Onboarding } from "./components/Onboarding";
@@ -69,6 +70,7 @@ export function App() {
           {view === "layers" && <LayersPage />}
           {view === "profiles" && <ProfilesPage />}
           {view === "exceptions" && <ExceptionsPage />}
+          {view === "scroll" && <ScrollPage />}
           {view === "settings" && <SettingsPage />}
           {view === "about" && <AboutPage />}
         </div>

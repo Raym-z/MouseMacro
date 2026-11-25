@@ -9,6 +9,11 @@ use crate::platform::service::CaptureMode;
 use crate::state::{AppState, Snapshot};
 
 #[tauri::command]
+pub fn get_wheel_lines() -> u32 {
+    crate::platform::simulate::wheel_lines()
+}
+
+#[tauri::command]
 pub fn get_snapshot(state: State<'_, AppState>) -> Snapshot {
     state.snapshot()
 }
@@ -221,6 +226,11 @@ pub fn test_action(state: State<'_, AppState>, action: Action) -> Result<(), Str
 }
 
 #[tauri::command]
+pub fn stop_macros(state: State<'_, AppState>) {
+    state.engine.stop_macros();
+}
+
+#[tauri::command]
 pub fn get_mapping_activity(
     state: State<'_, AppState>,
 ) -> Vec<crate::platform::service::MappingActivity> {
@@ -239,8 +249,20 @@ pub fn emergency_stop(state: State<'_, AppState>) -> Snapshot {
 }
 
 #[tauri::command]
-pub fn import_profile(state: State<'_, AppState>, path: String) -> Result<Snapshot, String> {
-    state.import_profile(&PathBuf::from(path))
+pub fn inspect_profile_import(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    state.inspect_profile_import(&PathBuf::from(path))
+}
+
+#[tauri::command]
+pub fn import_profile(
+    state: State<'_, AppState>,
+    path: String,
+    allow_launch: bool,
+) -> Result<Snapshot, String> {
+    state.import_profile(&PathBuf::from(path), allow_launch)
 }
 
 #[tauri::command]

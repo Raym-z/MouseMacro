@@ -2,16 +2,21 @@ use std::mem::size_of;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEINPUT, MOUSE_EVENT_FLAGS,
     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, VIRTUAL_KEY,
+};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, PostMessageW, ShowWindow, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOWNORMAL,
 };
 
 const XBUTTON1: u32 = 1;
 const XBUTTON2: u32 = 2;
 
-use crate::config::model::{INJECTION_TAG, MouseButton, ScrollDirection};
+use crate::config::model::{INJECTION_TAG, MouseButton, ScrollDirection, WindowAction};
 use crate::engine::keys::{ordered_for_press, vk_from_name};
 
 /// Sends native input. Every event is tagged so the low-level hook can ignore
@@ -190,7 +195,13 @@ pub fn replay_button(button: MouseButton, down: bool) -> Result<(), String> {
 
 pub fn scroll(direction: ScrollDirection, amount: i32) -> Result<(), String> {
     let amount = amount.clamp(1, 50);
-    let delta = 120 * amount;
+    scroll_raw(direction, 120 * amount)
+}
+
+/// Sends an exact wheel delta. Used when the scroll settings transform or
+/// accelerate a physical wheel event.
+pub fn scroll_raw(direction: ScrollDirection, delta: i32) -> Result<(), String> {
+    let delta = delta.abs().max(1);
     let (flag, data) = match direction {
         ScrollDirection::Up => (MOUSEEVENTF_WHEEL, delta as u32),
         ScrollDirection::Down => (MOUSEEVENTF_WHEEL, (-delta) as u32),
@@ -198,6 +209,124 @@ pub fn scroll(direction: ScrollDirection, amount: i32) -> Result<(), String> {
         ScrollDirection::Left => (MOUSEEVENTF_HWHEEL, (-delta) as u32),
     };
     send(&[mouse_input(flag, data)])
+}
+
+/// Types text as Unicode code units. This bypasses the keyboard layout, so
+/// non-Latin characters arrive intact.
+pub fn type_text(text: &str) -> Result<(), String> {
+    let mut inputs = Vec::new();
+    for unit in text.encode_utf16() {
+        for up in [false, true] {
+            let mut flags = KEYEVENTF_UNICODE;
+            if up {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(0),
+                        wScan: unit,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: INJECTION_TAG,
+                    },
+                },
+            });
+        }
+    }
+    // Send in chunks so a very long text does not exceed the API's practical
+    // batch size while still holding every code unit in order.
+    for chunk in inputs.chunks(256) {
+        send(chunk)?;
+    }
+    Ok(())
+}
+
+pub fn media_key(key: &str) -> Result<(), String> {
+    tap_keys(&[key.to_string()])
+}
+
+pub fn window_action(action: WindowAction) -> Result<(), String> {
+    match action {
+        WindowAction::SnapLeft => return tap_keys(&["win".into(), "left".into()]),
+        WindowAction::SnapRight => return tap_keys(&["win".into(), "right".into()]),
+        _ => {}
+    }
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return Err("No foreground window to act on.".into());
+    }
+
+    if action == WindowAction::Close {
+        // WM_SYSCOMMAND / SC_CLOSE. `PostMessageW` is asynchronous, which is
+        // what a close button press does.
+        return unsafe {
+            PostMessageW(
+                hwnd,
+                0x0112,
+                windows::Win32::Foundation::WPARAM(0xF060),
+                windows::Win32::Foundation::LPARAM(0),
+            )
+        }
+        .map_err(|error| format!("Could not close the window: {error}"));
+    }
+
+    let changed = match action {
+        WindowAction::Minimize => unsafe { ShowWindow(hwnd, SW_MINIMIZE) },
+        WindowAction::Maximize => unsafe { ShowWindow(hwnd, SW_MAXIMIZE) },
+        WindowAction::Restore => unsafe { ShowWindow(hwnd, SW_RESTORE) },
+        WindowAction::Close | WindowAction::SnapLeft | WindowAction::SnapRight => {
+            return Ok(());
+        }
+    };
+    if !changed.as_bool() {
+        return Err("Windows could not change the foreground window.".into());
+    }
+    Ok(())
+}
+
+pub fn launch(target: &str) -> Result<(), String> {    let target = target.trim();
+    if target.is_empty() {
+        return Err("Enter a program, file or URL to launch.".into());
+    }
+    let target = windows::core::HSTRING::from(target);
+    let result = unsafe {
+        ShellExecuteW(
+            windows::Win32::Foundation::HWND::default(),
+            windows::core::w!("open"),
+            &target,
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        return Err(format!(
+            "Windows could not open “{}”. Check the path or URL.",
+            target
+        ));
+    }
+    Ok(())
+}
+
+/// The system wheel setting in lines per notch. Shown for reference; the app's
+/// own speed multiplier is separate.
+pub fn wheel_lines() -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
+    let mut lines: u32 = 3;
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some(&mut lines as *mut u32 as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    lines.max(1)
 }
 
 #[cfg(test)]

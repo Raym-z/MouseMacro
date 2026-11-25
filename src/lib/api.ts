@@ -104,6 +104,7 @@ export const api = {
     invoke<Snapshot>("set_exception_enabled", { ruleId, enabled }),
   listOpenApps: () => invoke<OpenApp[]>("list_open_apps"),
   testAction: (action: Action) => invoke<void>("test_action", { action }),
+  stopMacros: () => invoke<void>("stop_macros"),
   getMappingActivity: () =>
     invoke<MappingActivity[]>("get_mapping_activity"),
   clearMappingActivity: () => invoke<void>("clear_mapping_activity"),
@@ -116,10 +117,13 @@ export const api = {
   createBackup: () => invoke<BackupInfo>("create_backup"),
   restoreBackup: (name: string) =>
     invoke<Snapshot>("restore_backup", { name }),
-  importProfile: (path: string) =>
-    invoke<Snapshot>("import_profile", { path }),
+  importProfile: (path: string, allowLaunch: boolean) =>
+    invoke<Snapshot>("import_profile", { path, allowLaunch }),
+  inspectProfileImport: (path: string) =>
+    invoke<string[]>("inspect_profile_import", { path }),
   exportProfile: (profileId: string, path: string) =>
     invoke<string>("export_profile", { profileId, path }),
+  getWheelLines: () => invoke<number>("get_wheel_lines"),
   resetConfig: () => invoke<Snapshot>("reset_config"),
   reloadConfig: () => invoke<Snapshot>("reload_config"),
   setCaptureMode: (mode: CaptureMode) =>

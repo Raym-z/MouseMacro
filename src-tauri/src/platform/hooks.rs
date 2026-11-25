@@ -354,19 +354,19 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
             if delta == 0 {
                 return false;
             }
-            if message == WM_MOUSEWHEEL {
-                MouseInput::Wheel(if delta > 0 {
+            let notches = (delta.unsigned_abs() as i32 / 120).max(1);
+            let direction = if message == WM_MOUSEWHEEL {
+                if delta > 0 {
                     ScrollDirection::Up
                 } else {
                     ScrollDirection::Down
-                })
+                }
+            } else if delta > 0 {
+                ScrollDirection::Right
             } else {
-                MouseInput::Wheel(if delta > 0 {
-                    ScrollDirection::Right
-                } else {
-                    ScrollDirection::Left
-                })
-            }
+                ScrollDirection::Left
+            };
+            MouseInput::Wheel { direction, notches }
         }
         _ => return false,
     };
@@ -380,7 +380,7 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
     let (kind, direction, button) = match &input {
         MouseInput::Down(button) => ("down", None, Some(button.label())),
         MouseInput::Up(button) => ("up", None, Some(button.label())),
-        MouseInput::Wheel(direction) => (
+        MouseInput::Wheel { direction, .. } => (
             "wheel",
             Some(match direction {
                 ScrollDirection::Up => "up",
@@ -391,7 +391,7 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
             None,
         ),
     };
-    let wheel_delta = if matches!(input, MouseInput::Wheel(_)) {
+    let wheel_delta = if matches!(input, MouseInput::Wheel { .. }) {
         (((info.mouseData >> 16) & 0xffff) as u16) as i16 as i32
     } else {
         0
@@ -401,7 +401,7 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
         kind: kind.to_string(),
         direction: direction.map(str::to_string),
         button: button.map(str::to_string),
-        axis: matches!(input, MouseInput::Wheel(_)).then(|| {
+        axis: matches!(input, MouseInput::Wheel { .. }).then(|| {
             if message == WM_MOUSEWHEEL {
                 "vertical".to_string()
             } else {

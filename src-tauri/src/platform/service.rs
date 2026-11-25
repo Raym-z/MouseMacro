@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
 use crate::config::model::{
-    Action, AppConfig, ExceptionMode, MouseButton, ScrollDirection,
+    Action, AppConfig, ExceptionMode, MacroStep, MouseButton, ScrollDirection, ScrollSettings,
 };
 use crate::engine::{keys, Effect, EngineConfig, InputEngine, InputEvent};
 use crate::platform::simulate;
@@ -23,7 +23,12 @@ pub(crate) fn now_ms() -> u64 {
 pub enum MouseInput {
     Down(MouseButton),
     Up(MouseButton),
-    Wheel(ScrollDirection),
+    /// A physical wheel event. `notches` is the reported delta in 120-unit
+    /// notches, at least 1.
+    Wheel {
+        direction: ScrollDirection,
+        notches: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,46 +59,118 @@ impl CaptureMode {
     }
 }
 
+#[derive(Clone)]
 enum HeldSynthetic {
     Keys(Vec<String>),
     Mouse(MouseButton),
 }
 
+impl HeldSynthetic {
+    fn identity(&self) -> String {
+        match self {
+            HeldSynthetic::Keys(keys) => combo_identity(keys),
+            HeldSynthetic::Mouse(button) => format!("mouse:{}", button.label()),
+        }
+    }
+}
+
+/// Order-insensitive identity for a key combination, used to match hold and
+/// release steps even in hand-edited configurations.
+fn combo_identity(keys: &[String]) -> String {
+    let mut sorted = keys.to_vec();
+    sorted.sort();
+    format!("keys:{}", sorted.join("+"))
+}
+
 /// Owns all synthetic down states so they can be released deterministically.
-#[derive(Default)]
+/// The fields are shared with macro threads, which is why every mutable piece
+/// sits behind its own `Arc` rather than a single outer lock.
+#[derive(Clone, Default)]
 pub struct Executor {
-    holds: Mutex<HashMap<String, HeldSynthetic>>,
-    last_error: Mutex<Option<String>>,
+    holds: Arc<Mutex<HashMap<String, HeldSynthetic>>>,
+    /// Sticky state for toggle-key and drag-lock actions.
+    toggles: Arc<Mutex<HashMap<String, HeldSynthetic>>>,
+    /// Cancellation flags for running macros, keyed by mapping id.
+    macros: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    seq: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Executor {
-    fn run(&self, action: &Action) {
+    fn next_token(&self, kind: &str, key: &str) -> String {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        format!("{kind}:{key}:{seq}")
+    }
+
+    fn run(&self, key: &str, action: &Action) {
         let result = match action {
             Action::Shortcut { keys } | Action::HoldKeys { keys } => simulate::tap_keys(keys),
-            Action::Key { key } => simulate::tap_keys(std::slice::from_ref(key)),
+            Action::Key { key: k } => simulate::tap_keys(std::slice::from_ref(k)),
             Action::MouseClick { button } | Action::MouseHold { button } => {
                 simulate::click_button(*button)
             }
             Action::Scroll { direction, amount } => simulate::scroll(*direction, *amount),
+            Action::Macro {
+                steps,
+                repeat,
+                interval_ms,
+                toggle,
+            } => self.start_macro(key, steps, *repeat, *interval_ms, *toggle),
+            Action::Launch { target } => simulate::launch(target),
+            Action::TypeText { text } => simulate::type_text(text),
+            Action::Media { key: media } => simulate::media_key(media),
+            Action::Window { action } => simulate::window_action(*action),
+            Action::ToggleKeys { keys } => {
+                self.toggle(&combo_identity(keys), HeldSynthetic::Keys(keys.clone()))
+            }
+            Action::DragLock { button } => {
+                self.toggle(&format!("mouse:{}", button.label()), HeldSynthetic::Mouse(*button))
+            }
             Action::Disable | Action::None => Ok(()),
         };
         self.finish(result);
+    }
+
+    /// Presses or releases a sticky toggle. Repeat presses release it again.
+    fn toggle(&self, key: &str, state: HeldSynthetic) -> Result<(), String> {
+        let held = {
+            let mut toggles = self.toggles.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = toggles.remove(key) {
+                Some(existing)
+            } else {
+                toggles.insert(key.to_string(), state.clone());
+                None
+            }
+        };
+        match held {
+            Some(HeldSynthetic::Keys(keys)) => simulate::release_keys(&keys),
+            Some(HeldSynthetic::Mouse(button)) => simulate::release_button(button),
+            None => match state {
+                HeldSynthetic::Keys(keys) => simulate::press_keys(&keys),
+                HeldSynthetic::Mouse(button) => simulate::press_button(button),
+            },
+        }
     }
 
     fn start_hold(&self, token: &str, action: &Action) {
         self.release(token);
         let result = match action {
             Action::HoldKeys { keys } => simulate::press_keys(keys).map(|_| {
-                let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
-                holds.insert(token.to_string(), HeldSynthetic::Keys(keys.clone()));
+                self.holds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(token.to_string(), HeldSynthetic::Keys(keys.clone()));
             }),
             Action::MouseHold { button } => simulate::press_button(*button).map(|_| {
-                let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
-                holds.insert(token.to_string(), HeldSynthetic::Mouse(*button));
+                self.holds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(token.to_string(), HeldSynthetic::Mouse(*button));
             }),
             other => {
                 // Not a sustained action: execute it and do not keep a hold.
-                self.run(other);
+                let key = token.split(':').nth(1).unwrap_or("test");
+                self.run(key, other);
                 Ok(())
             }
         };
@@ -114,16 +191,193 @@ impl Executor {
     }
 
     pub fn release_all(&self) {
-        let held: Vec<(String, HeldSynthetic)> = {
+        self.cancel_macros();
+        let held: Vec<HeldSynthetic> = {
             let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
-            holds.drain().collect()
+            holds.drain().map(|(_, held)| held).collect()
         };
-        for (_, held) in held {
+        let toggles: Vec<HeldSynthetic> = {
+            let mut toggles = self.toggles.lock().unwrap_or_else(|e| e.into_inner());
+            toggles.drain().map(|(_, held)| held).collect()
+        };
+        for held in held.into_iter().chain(toggles) {
             let result = match held {
                 HeldSynthetic::Keys(keys) => simulate::release_keys(&keys),
                 HeldSynthetic::Mouse(button) => simulate::release_button(button),
             };
             self.finish(result);
+        }
+    }
+
+    pub fn cancel_macros(&self) {
+        let macros = {
+            let mut macros = self.macros.lock().unwrap_or_else(|e| e.into_inner());
+            macros.drain().map(|(_, flag)| flag).collect::<Vec<_>>()
+        };
+        for flag in macros {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Stops every macro and immediately releases keys and buttons that the
+    /// macros are holding. Used by the editor's Stop button.
+    pub fn stop_macros(&self) {
+        self.cancel_macros();
+        let held: Vec<HeldSynthetic> = {
+            let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
+            let tokens: Vec<String> = holds
+                .keys()
+                .filter(|token| token.starts_with("macro:"))
+                .cloned()
+                .collect();
+            tokens
+                .into_iter()
+                .filter_map(|token| holds.remove(&token))
+                .collect()
+        };
+        for held in held {
+            let result = match held {
+                HeldSynthetic::Keys(keys) => simulate::release_keys(&keys),
+                HeldSynthetic::Mouse(button) => simulate::release_button(button),
+            };
+            self.finish(result);
+        }
+    }
+
+    fn start_macro(
+        &self,
+        key: &str,
+        steps: &[MacroStep],
+        repeat: u32,
+        interval_ms: u64,
+        toggle: bool,
+    ) -> Result<(), String> {
+        if steps.is_empty() {
+            return Err("This macro has no steps yet.".into());
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut macros = self.macros.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = macros.remove(key) {
+                // Non-toggle macros replace an earlier run instead of stacking
+                // up; a toggle press stops its own macro.
+                existing.store(true, Ordering::SeqCst);
+                if toggle {
+                    return Ok(());
+                }
+            }
+            macros.insert(key.to_string(), cancel.clone());
+        }
+
+        let executor = self.clone();
+        let thread_key = key.to_string();
+        let error_key = key.to_string();
+        let steps = steps.to_vec();
+        let repeat = repeat.clamp(1, 100);
+        let interval_ms = interval_ms.min(10_000);
+        let spawn = thread::Builder::new()
+            .name("mousemacro-macro".into())
+            .spawn(move || {
+                executor.execute_macro(&thread_key, &steps, repeat, interval_ms, &cancel);
+            });
+        if let Err(error) = spawn {
+            let mut macros = self.macros.lock().unwrap_or_else(|e| e.into_inner());
+            macros.remove(error_key.as_str());
+            return Err(format!("Could not start the macro: {error}"));
+        }
+        Ok(())
+    }
+
+    fn execute_macro(
+        &self,
+        key: &str,
+        steps: &[MacroStep],
+        repeat: u32,
+        interval_ms: u64,
+        cancel: &Arc<AtomicBool>,
+    ) {
+        let base = self.next_token("macro", key);
+        // Tokens created by hold steps, paired with their release identity.
+        let mut held: Vec<(String, String)> = Vec::new();
+
+        'outer: for round in 0..repeat {
+            if round > 0 && !sleep_cancellable(cancel, interval_ms) {
+                break;
+            }
+            for (index, step) in steps.iter().enumerate() {
+                if cancel.load(Ordering::SeqCst) {
+                    break 'outer;
+                }
+                let token = format!("{base}:{round}:{index}");
+                if let Err(error) = self.execute_step(step, &token, &mut held) {
+                    self.finish(Err(error));
+                    break 'outer;
+                }
+                if !sleep_cancellable(cancel, step.delay_ms()) {
+                    break 'outer;
+                }
+            }
+        }
+
+        for (token, _) in held.drain(..) {
+            self.release(&token);
+        }
+
+        // Clear the registry entry only if this run is still the registered one.
+        let mut macros = self.macros.lock().unwrap_or_else(|e| e.into_inner());
+        if macros
+            .get(key)
+            .is_some_and(|flag| Arc::ptr_eq(flag, cancel))
+        {
+            macros.remove(key);
+        }
+    }
+
+    fn execute_step(
+        &self,
+        step: &MacroStep,
+        token: &str,
+        held: &mut Vec<(String, String)>,
+    ) -> Result<(), String> {
+        match step {
+            MacroStep::TapKeys { keys, .. } => simulate::tap_keys(keys),
+            MacroStep::HoldKeys { keys, .. } => {
+                self.start_hold(token, &Action::HoldKeys { keys: keys.clone() });
+                held.push((token.to_string(), HeldSynthetic::Keys(keys.clone()).identity()));
+                Ok(())
+            }
+            MacroStep::ReleaseKeys { keys, .. } => {
+                self.release_identity(held, &HeldSynthetic::Keys(keys.clone()).identity());
+                Ok(())
+            }
+            MacroStep::Wait { .. } => Ok(()),
+            MacroStep::MouseClick { button, .. } => simulate::click_button(*button),
+            MacroStep::MouseHold { button, .. } => {
+                self.start_hold(token, &Action::MouseHold { button: *button });
+                held.push((token.to_string(), HeldSynthetic::Mouse(*button).identity()));
+                Ok(())
+            }
+            MacroStep::MouseRelease { button, .. } => {
+                self.release_identity(held, &HeldSynthetic::Mouse(*button).identity());
+                Ok(())
+            }
+            MacroStep::Scroll {
+                direction, amount, ..
+            } => simulate::scroll(*direction, *amount),
+            MacroStep::TypeText { text, .. } => simulate::type_text(text),
+        }
+    }
+
+    fn release_identity(&self, held: &mut Vec<(String, String)>, identity: &str) {
+        let mut index = 0;
+        while index < held.len() {
+            if held[index].1 == identity {
+                let (token, _) = held.remove(index);
+                self.release(&token);
+            } else {
+                index += 1;
+            }
         }
     }
 
@@ -147,6 +401,21 @@ impl Executor {
     }
 }
 
+/// Sleeps in short slices so a cancel (panic, toggle press, app switch) is not
+/// delayed by a long macro wait.
+fn sleep_cancellable(cancel: &AtomicBool, ms: u64) -> bool {
+    let mut remaining = ms;
+    while remaining > 0 {
+        if cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        let chunk = remaining.min(25);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining -= chunk;
+    }
+    !cancel.load(Ordering::SeqCst)
+}
+
 struct Inner {
     engine: InputEngine,
 }
@@ -159,6 +428,8 @@ struct RuntimeState {
     exception_mode: ExceptionMode,
     profile_override: Option<String>,
     panic: bool,
+    /// Wheel transform in effect. `None` passes physical wheels through.
+    scroll: Option<ScrollSettings>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +451,7 @@ pub struct EngineService {
     accept_external_injection: AtomicBool,
     hooks_active: AtomicBool,
     hook_warning: Mutex<Option<String>>,
+    last_wheel_ms: AtomicU64,
 }
 
 impl EngineService {
@@ -200,7 +472,12 @@ impl EngineService {
             ),
             hooks_active: AtomicBool::new(false),
             hook_warning: Mutex::new(None),
+            last_wheel_ms: AtomicU64::new(0),
         });
+        {
+            let mut runtime = service.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            Self::resolve_runtime(config, &mut runtime);
+        }
         Self::spawn_timer(service.clone());
         service
     }
@@ -281,6 +558,8 @@ impl EngineService {
     fn resolve_runtime(config: &AppConfig, runtime: &mut RuntimeState) {
         runtime.exception_mode = ExceptionMode::Always;
         runtime.profile_override = None;
+        runtime.scroll = Some(config.settings.scroll.clone());
+
         let Some(process) = runtime.foreground.as_deref() else {
             return;
         };
@@ -289,7 +568,30 @@ impl EngineService {
             if rule.mode == ExceptionMode::Profile {
                 runtime.profile_override = rule.profile_id.clone();
             }
+            // An explicit wheel override always applies. With mappings off and
+            // no override, the wheel is left completely alone.
+            runtime.scroll = rule.scroll.clone().or_else(|| {
+                if rule.mode == ExceptionMode::Disable {
+                    None
+                } else {
+                    Some(config.settings.scroll.clone())
+                }
+            });
         }
+    }
+
+    /// The wheel transform for the current app, or `None` when physical wheel
+    /// events should pass through untouched.
+    fn effective_scroll(&self) -> Option<ScrollSettings> {
+        let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        if !config.settings.enabled {
+            return None;
+        }
+        let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        if runtime.panic {
+            return None;
+        }
+        runtime.scroll.clone()
     }
 
     fn apply_effective(&self, effective: EngineConfig, notify: bool) {
@@ -386,9 +688,22 @@ impl EngineService {
             .panic
     }
 
-    /// Runs an action once for the editor's Test button.
+    /// Runs an action once for the editor's Test button. Sticky actions are
+    /// toggled on and then immediately off so a preview never leaves a key or
+    /// mouse button held down.
     pub fn test_action(&self, action: &Action) {
-        self.executor.run(action);
+        match action {
+            Action::ToggleKeys { .. } | Action::DragLock { .. } => {
+                self.executor.run("test", action);
+                self.executor.run("test", action);
+            }
+            _ => self.executor.run("test", action),
+        }
+    }
+
+    /// Stops every running macro and releases the keys/buttons they hold.
+    pub fn stop_macros(&self) {
+        self.executor.stop_macros();
     }
 
     fn record_fired(&self, mapping_id: &str) {
@@ -498,10 +813,24 @@ impl EngineService {
         }
 
         let time = now_ms();
-        let event = match input {
-            MouseInput::Down(button) => InputEvent::ButtonDown { button, time },
-            MouseInput::Up(button) => InputEvent::ButtonUp { button, time },
-            MouseInput::Wheel(direction) => InputEvent::Wheel { direction, time },
+        let (event, transform) = match input {
+            MouseInput::Down(button) => (InputEvent::ButtonDown { button, time }, None),
+            MouseInput::Up(button) => (InputEvent::ButtonUp { button, time }, None),
+            MouseInput::Wheel { direction, notches } => {
+                match self.effective_scroll() {
+                    Some(settings) if !settings.is_identity() => {
+                        let target = settings.transform(direction);
+                        (
+                            InputEvent::Wheel {
+                                direction: target,
+                                time,
+                            },
+                            Some((settings, target, notches)),
+                        )
+                    }
+                    _ => (InputEvent::Wheel { direction, time }, None),
+                }
+            }
         };
 
         let outcome = {
@@ -510,7 +839,41 @@ impl EngineService {
         };
         self.cv.notify_all();
         self.execute(outcome.effects);
+
+        if let Some((settings, direction, notches)) = transform {
+            // The engine matched a gesture: the physical event is consumed.
+            if outcome.suppress {
+                return true;
+            }
+            let multiplier = self.wheel_multiplier(&settings);
+            let delta = 120 * notches.max(1) * multiplier;
+            if let Err(error) = simulate::scroll_raw(direction, delta) {
+                self.executor.finish(Err(error));
+            }
+            return true;
+        }
+
         outcome.suppress
+    }
+
+    /// Extra notches for accelerated scrolling. Time-based because Windows
+    /// applications only understand whole wheel notches.
+    fn wheel_multiplier(&self, settings: &ScrollSettings) -> i32 {
+        let base = settings.speed as i32;
+        if !settings.acceleration {
+            return base;
+        }
+        let now = now_ms();
+        let last = self.last_wheel_ms.swap(now, Ordering::SeqCst);
+        if last == 0 {
+            return base;
+        }
+        let bonus = match now.saturating_sub(last) {
+            0..=59 => 2,
+            60..=139 => 1,
+            _ => 0,
+        };
+        (base + bonus).min(5)
     }
 
     /// Entry point for the low-level keyboard hook. Keyboard hooks are only
@@ -586,7 +949,7 @@ impl EngineService {
                 "button": button,
                 "label": button.label(),
             }),
-            MouseInput::Wheel(direction) => json!({
+            MouseInput::Wheel { direction, .. } => json!({
                 "kind": "mouse",
                 "event": "wheel",
                 "direction": direction,
@@ -604,7 +967,7 @@ impl EngineService {
                     mapping_id,
                 } => {
                     self.record_fired(&mapping_id);
-                    self.executor.run(&action)
+                    self.executor.run(&mapping_id, &action)
                 }
                 Effect::StartHold { token, action } => {
                     // Tokens are `kind:mapping-id:sequence`.
@@ -660,7 +1023,8 @@ impl EngineService {
 mod tests {
     use super::*;
     use crate::config::model::{
-        Action, AppConfig, ExceptionMode, ExceptionRule, Layer, Mapping, MouseButton, Trigger,
+        Action, AppConfig, ExceptionMode, ExceptionRule, Layer, Mapping, MouseButton,
+        ScrollSettings, Trigger,
     };
 
     fn config_with_alternative_profile() -> (AppConfig, String) {
@@ -770,5 +1134,54 @@ mod tests {
         EngineService::resolve_runtime(&config, &mut runtime);
         assert_eq!(runtime.exception_mode, ExceptionMode::Always);
         assert!(runtime.profile_override.is_none());
+    }
+
+    #[test]
+    fn application_scroll_override_wins_over_global() {
+        let mut config = AppConfig::default();
+        config.settings.scroll.invert_vertical = true;
+        let mut rule = ExceptionRule::new("game.exe", ExceptionMode::Always);
+        rule.scroll = Some(ScrollSettings {
+            swap_axes: true,
+            ..ScrollSettings::default()
+        });
+        config.exceptions.push(rule);
+
+        let mut runtime = RuntimeState {
+            foreground: Some("game.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        let scroll = runtime.scroll.expect("override should apply");
+        assert!(scroll.swap_axes);
+        assert!(!scroll.invert_vertical);
+    }
+
+    #[test]
+    fn mappings_off_without_a_scroll_override_passes_wheels_through() {
+        let mut config = AppConfig::default();
+        config.settings.scroll.invert_vertical = true;
+        config
+            .exceptions
+            .push(ExceptionRule::new("game.exe", ExceptionMode::Disable));
+
+        let mut runtime = RuntimeState {
+            foreground: Some("game.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert!(runtime.scroll.is_none());
+    }
+
+    #[test]
+    fn key_identity_is_order_insensitive() {
+        assert_eq!(
+            combo_identity(&["shift".into(), "ctrl".into()]),
+            combo_identity(&["ctrl".into(), "shift".into()])
+        );
+        assert_ne!(
+            combo_identity(&["ctrl".into()]),
+            combo_identity(&["shift".into()])
+        );
     }
 }

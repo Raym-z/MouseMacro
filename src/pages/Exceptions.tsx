@@ -24,6 +24,7 @@ import type {
   ExceptionMode,
   ExceptionRule,
   OpenApp,
+  ScrollSettings,
 } from "../lib/types";
 import { cn } from "../lib/cn";
 
@@ -34,6 +35,7 @@ function emptyRule(): ExceptionRule {
     mode: "disable",
     profileId: null,
     enabled: true,
+    scroll: null,
   };
 }
 
@@ -142,6 +144,11 @@ export function ExceptionsPage() {
       enabled ? "Rule enabled" : "Rule disabled",
     );
     setBusyId(null);
+  };
+
+  const patchScroll = (next: Partial<ScrollSettings>) => {
+    if (!draft.scroll) return;
+    setDraft({ ...draft, scroll: { ...draft.scroll, ...next } });
   };
 
   const filteredApps = useMemo(() => {
@@ -388,6 +395,70 @@ export function ExceptionsPage() {
             </Field>
           )}
 
+          <div className="rounded-xl border border-zinc-200/80 px-3 py-2.5 dark:border-white/[0.07]">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[12.5px] font-medium">Scroll override</div>
+                <div className="text-[11px] leading-relaxed text-secondary">
+                  {draft.scroll
+                    ? "This app uses its own wheel direction and speed."
+                    : draft.mode === "disable"
+                      ? "Mappings off leaves the wheel untouched."
+                      : "Inherits the global Scroll settings."}
+                </div>
+              </div>
+              <Switch
+                checked={draft.scroll !== null}
+                onChange={(enabled) =>
+                  setDraft({
+                    ...draft,
+                    scroll: enabled ? { ...config.settings.scroll } : null,
+                  })
+                }
+                label="Override scroll for this app"
+              />
+            </div>
+
+            {draft.scroll && (
+              <div className="mt-3 space-y-2 border-t border-zinc-100 pt-3 dark:border-white/[0.05]">
+                <CompactToggle
+                  label="Invert vertical"
+                  checked={draft.scroll.invertVertical}
+                  onChange={(invertVertical) => patchScroll({ invertVertical })}
+                />
+                <CompactToggle
+                  label="Invert horizontal"
+                  checked={draft.scroll.invertHorizontal}
+                  onChange={(invertHorizontal) =>
+                    patchScroll({ invertHorizontal })
+                  }
+                />
+                <CompactToggle
+                  label="Swap axes"
+                  checked={draft.scroll.swapAxes}
+                  onChange={(swapAxes) => patchScroll({ swapAxes })}
+                />
+                <CompactToggle
+                  label="Acceleration"
+                  checked={draft.scroll.acceleration}
+                  onChange={(acceleration) => patchScroll({ acceleration })}
+                />
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <span className="text-[11.5px]">Speed</span>
+                  <Segmented
+                    size="sm"
+                    value={String(draft.scroll.speed)}
+                    onChange={(value) => patchScroll({ speed: Number(value) })}
+                    options={[1, 2, 3, 4, 5].map((speed) => ({
+                      value: String(speed),
+                      label: `×${speed}`,
+                    }))}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
           {draft.mode === "always" && (
             <Callout tone="info">
               <span className="flex items-start gap-2">
@@ -482,6 +553,23 @@ export function ExceptionsPage() {
         description="The app will use the normal global behaviour again."
         confirmLabel="Delete rule"
       />
+    </div>
+  );
+}
+
+function CompactToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-[11.5px]">{label}</span>
+      <Switch size="sm" checked={checked} onChange={onChange} label={label} />
     </div>
   );
 }

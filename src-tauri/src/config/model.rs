@@ -1,8 +1,24 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
+
+/// Media keys are sent as their dedicated virtual-key codes. Keeping the list
+/// here means the UI, validation and injection all agree on the same names.
+pub const MEDIA_KEYS: [&str; 7] = [
+    "volumeup",
+    "volumedown",
+    "volumemute",
+    "mediaplaypause",
+    "medianext",
+    "mediaprev",
+    "mediastop",
+];
+
+pub fn is_media_key(name: &str) -> bool {
+    MEDIA_KEYS.iter().any(|key| key.eq_ignore_ascii_case(name))
+}
 
 /// Default emergency stop. `F12` is reachable on every keyboard and unlikely to
 /// collide with application shortcuts when combined with three modifiers.
@@ -51,6 +67,166 @@ impl ScrollDirection {
 
 }
 
+/// Wheel handling for physical wheel events. The defaults are a pass-through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScrollSettings {
+    pub invert_vertical: bool,
+    pub invert_horizontal: bool,
+    /// Treat a vertical wheel as horizontal and vice versa.
+    pub swap_axes: bool,
+    /// How many notches to send per physical notch (1–5).
+    pub speed: u32,
+    /// Experimental: send more notches when events arrive in quick succession.
+    pub acceleration: bool,
+}
+
+impl Default for ScrollSettings {
+    fn default() -> Self {
+        Self {
+            invert_vertical: false,
+            invert_horizontal: false,
+            swap_axes: false,
+            speed: 1,
+            acceleration: false,
+        }
+    }
+}
+
+impl ScrollSettings {
+    pub fn sanitize(&mut self) {
+        self.speed = self.speed.clamp(1, 5);
+    }
+
+    /// True when the settings leave input untouched.
+    pub fn is_identity(&self) -> bool {
+        !self.invert_vertical
+            && !self.invert_horizontal
+            && !self.swap_axes
+            && self.speed == 1
+            && !self.acceleration
+    }
+
+    pub fn transform(&self, direction: ScrollDirection) -> ScrollDirection {
+        use ScrollDirection::*;
+        let swapped = if self.swap_axes {
+            match direction {
+                Up => Right,
+                Down => Left,
+                Right => Up,
+                Left => Down,
+            }
+        } else {
+            direction
+        };
+        match swapped {
+            Up if self.invert_vertical => Down,
+            Down if self.invert_vertical => Up,
+            Left if self.invert_horizontal => Right,
+            Right if self.invert_horizontal => Left,
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowAction {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+    SnapLeft,
+    SnapRight,
+}
+
+impl WindowAction {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowAction::Minimize => "Minimize window",
+            WindowAction::Maximize => "Maximize window",
+            WindowAction::Restore => "Restore window",
+            WindowAction::Close => "Close window",
+            WindowAction::SnapLeft => "Snap left",
+            WindowAction::SnapRight => "Snap right",
+        }
+    }
+}
+
+fn default_macro_amount() -> i32 {
+    3
+}
+
+/// One ordered step inside a macro. `delay_ms` is the pause *after* the step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum MacroStep {
+    TapKeys {
+        keys: Vec<String>,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    HoldKeys {
+        keys: Vec<String>,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    ReleaseKeys {
+        keys: Vec<String>,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    Wait {
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    MouseClick {
+        button: MouseButton,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    MouseHold {
+        button: MouseButton,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    MouseRelease {
+        button: MouseButton,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    Scroll {
+        direction: ScrollDirection,
+        #[serde(default = "default_macro_amount")]
+        amount: i32,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+    TypeText {
+        text: String,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+}
+
+impl MacroStep {
+    pub fn delay_ms(&self) -> u64 {
+        match self {
+            MacroStep::TapKeys { delay_ms, .. }
+            | MacroStep::HoldKeys { delay_ms, .. }
+            | MacroStep::ReleaseKeys { delay_ms, .. }
+            | MacroStep::Wait { delay_ms }
+            | MacroStep::MouseClick { delay_ms, .. }
+            | MacroStep::MouseHold { delay_ms, .. }
+            | MacroStep::MouseRelease { delay_ms, .. }
+            | MacroStep::Scroll { delay_ms, .. }
+            | MacroStep::TypeText { delay_ms, .. } => *delay_ms,
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Trigger {
@@ -65,19 +241,69 @@ pub enum Trigger {
 
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
-    Shortcut { keys: Vec<String> },
-    Key { key: String },
-    HoldKeys { keys: Vec<String> },
-    MouseClick { button: MouseButton },
-    MouseHold { button: MouseButton },
+    Shortcut {
+        keys: Vec<String>,
+    },
+    Key {
+        key: String,
+    },
+    HoldKeys {
+        keys: Vec<String>,
+    },
+    MouseClick {
+        button: MouseButton,
+    },
+    MouseHold {
+        button: MouseButton,
+    },
     Scroll {
         direction: ScrollDirection,
         amount: i32,
     },
+    /// An ordered action sequence. Runs off the hook thread so it can contain
+    /// waits without blocking input handling.
+    Macro {
+        #[serde(default)]
+        steps: Vec<MacroStep>,
+        #[serde(default = "default_macro_repeat")]
+        repeat: u32,
+        #[serde(default)]
+        interval_ms: u64,
+        /// When true, pressing the same source again cancels the running macro.
+        #[serde(default)]
+        toggle: bool,
+    },
+    /// Open a program, file, folder or URL through the Windows shell.
+    Launch {
+        target: String,
+    },
+    /// Type text into the focused window using Unicode input.
+    TypeText {
+        text: String,
+    },
+    /// A system media key.
+    Media {
+        key: String,
+    },
+    Window {
+        action: WindowAction,
+    },
+    /// Press a key combination and keep it held until the action runs again.
+    ToggleKeys {
+        keys: Vec<String>,
+    },
+    /// Toggle a held mouse button, useful for drag-selecting.
+    DragLock {
+        button: MouseButton,
+    },
     Disable,
     None,
+}
+
+fn default_macro_repeat() -> u32 {
+    1
 }
 
 impl Action {
@@ -85,8 +311,8 @@ impl Action {
     pub fn is_sustained(&self) -> bool {
         matches!(self, Action::MouseHold { .. } | Action::HoldKeys { .. })
     }
-
 }
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +396,10 @@ pub struct ExceptionRule {
     pub profile_id: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional wheel override for this application. `None` inherits the
+    /// global scroll settings.
+    #[serde(default)]
+    pub scroll: Option<ScrollSettings>,
 }
 
 impl ExceptionRule {
@@ -181,6 +411,7 @@ impl ExceptionRule {
             mode,
             profile_id: None,
             enabled: true,
+            scroll: None,
         }
     }
 
@@ -265,6 +496,10 @@ pub struct Settings {
     /// False on a fresh install so the app can offer guided setup.
     #[serde(default)]
     pub onboarded: bool,
+    /// Physical wheel handling that applies everywhere unless an application
+    /// rule overrides it.
+    #[serde(default)]
+    pub scroll: ScrollSettings,
 }
 
 fn default_panic_hotkey() -> Vec<String> {
@@ -288,6 +523,7 @@ impl Default for Settings {
             rule_priority: RuleCategory::all(),
             panic_hotkey: default_panic_hotkey(),
             onboarded: false,
+            scroll: ScrollSettings::default(),
         }
     }
 }
@@ -296,6 +532,7 @@ impl Settings {
     pub fn sanitize(&mut self) {
         self.long_press_ms = self.long_press_ms.clamp(100, 2_000);
         self.double_click_ms = self.double_click_ms.clamp(120, 1_000);
+        self.scroll.sanitize();
 
         self.panic_hotkey = self
             .panic_hotkey
@@ -560,6 +797,9 @@ impl AppConfig {
                     rule.process
                 ));
             }
+            if let Some(scroll) = rule.scroll.as_mut() {
+                scroll.sanitize();
+            }
             true
         });
         if self.exceptions.len() != before_exceptions {
@@ -601,13 +841,7 @@ fn sanitize_mappings(
 
         match &mut mapping.action {
             Action::Shortcut { keys } | Action::HoldKeys { keys } => {
-                keys.retain(|key| !key.trim().is_empty());
-                for key in keys.iter_mut() {
-                    *key = key.trim().to_lowercase();
-                }
-                keys.dedup();
-                keys.truncate(8);
-                !keys.is_empty()
+                sanitize_key_list(keys, 8)
             }
             Action::Key { key } => {
                 *key = key.trim().to_lowercase();
@@ -617,7 +851,69 @@ fn sanitize_mappings(
                 *amount = (*amount).clamp(1, 50);
                 true
             }
-            _ => true,
+            Action::Macro {
+                steps,
+                repeat,
+                interval_ms,
+                toggle: _,
+            } => {
+                steps.retain_mut(sanitize_step);
+                *repeat = (*repeat).clamp(1, 100);
+                *interval_ms = (*interval_ms).min(10_000);
+                steps.truncate(40);
+
+                // Honour the two-minute budget even for hand-edited or
+                // imported files: trim trailing steps and reduce the repeat
+                // count until one full run plus its intervals fits.
+                const BUDGET_MS: u64 = 120_000;
+                let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
+                if step_total > BUDGET_MS {
+                    let mut running = 0u64;
+                    steps.retain(|step| {
+                        if running.saturating_add(step.delay_ms()) > BUDGET_MS {
+                            return false;
+                        }
+                        running = running.saturating_add(step.delay_ms());
+                        true
+                    });
+                }
+                let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
+                while *repeat > 1 {
+                    let rounds = *repeat as u64;
+                    let total = step_total
+                        .saturating_mul(rounds)
+                        .saturating_add(interval_ms.saturating_mul(rounds.saturating_sub(1)));
+                    if total <= BUDGET_MS {
+                        break;
+                    }
+                    *repeat -= 1;
+                }
+                !steps.is_empty()
+            }
+            Action::Launch { target } => {
+                *target = target.trim().chars().take(1_000).collect();
+                !target.is_empty()
+            }
+            Action::TypeText { text } => {
+                *text = text.chars().take(2_000).collect();
+                !text.is_empty()
+            }
+            Action::Media { key } => {
+                let lower = key.trim().to_lowercase();
+                if is_media_key(&lower) {
+                    *key = lower;
+                    true
+                } else {
+                    false
+                }
+            }
+            Action::ToggleKeys { keys } => sanitize_key_list(keys, 4),
+            Action::Window { .. }
+            | Action::DragLock { .. }
+            | Action::MouseClick { .. }
+            | Action::MouseHold { .. }
+            | Action::Disable
+            | Action::None => true,
         }
     });
     if mappings.len() != before {
@@ -627,6 +923,56 @@ fn sanitize_mappings(
         ));
     }
     mappings.truncate(500);
+}
+
+/// Lowercases, trims and de-duplicates a key list. Returns false when nothing
+/// usable remains so the caller can drop the mapping or macro step.
+fn sanitize_key_list(keys: &mut Vec<String>, max: usize) -> bool {
+    let mut seen: Vec<String> = Vec::new();
+    keys.retain_mut(|key| {
+        let normalized = key.trim().to_lowercase();
+        if normalized.is_empty() || seen.contains(&normalized) {
+            return false;
+        }
+        seen.push(normalized.clone());
+        *key = normalized;
+        true
+    });
+    keys.truncate(max);
+    !keys.is_empty()
+}
+
+fn sanitize_step(step: &mut MacroStep) -> bool {
+    match step {
+        MacroStep::TapKeys { keys, delay_ms }
+        | MacroStep::HoldKeys { keys, delay_ms }
+        | MacroStep::ReleaseKeys { keys, delay_ms } => {
+            *delay_ms = (*delay_ms).min(60_000);
+            sanitize_key_list(keys, 8)
+        }
+        MacroStep::Wait { delay_ms } => {
+            *delay_ms = (*delay_ms).clamp(1, 60_000);
+            true
+        }
+        MacroStep::MouseClick { delay_ms, .. }
+        | MacroStep::MouseHold { delay_ms, .. }
+        | MacroStep::MouseRelease { delay_ms, .. } => {
+            *delay_ms = (*delay_ms).min(60_000);
+            true
+        }
+        MacroStep::Scroll {
+            amount, delay_ms, ..
+        } => {
+            *amount = (*amount).clamp(1, 50);
+            *delay_ms = (*delay_ms).min(60_000);
+            true
+        }
+        MacroStep::TypeText { text, delay_ms } => {
+            *text = text.chars().take(2_000).collect();
+            *delay_ms = (*delay_ms).min(60_000);
+            !text.is_empty()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -761,5 +1107,146 @@ mod tests {
         let before = config.profiles[0].mappings.len();
         config.sanitize();
         assert_eq!(config.profiles[0].mappings.len(), before - 1);
+    }
+
+    #[test]
+    fn scroll_settings_invert_and_swap_axes() {
+        let inverted = ScrollSettings {
+            invert_vertical: true,
+            ..ScrollSettings::default()
+        };
+        assert_eq!(inverted.transform(ScrollDirection::Up), ScrollDirection::Down);
+        assert_eq!(
+            inverted.transform(ScrollDirection::Down),
+            ScrollDirection::Up
+        );
+        assert_eq!(
+            inverted.transform(ScrollDirection::Left),
+            ScrollDirection::Left
+        );
+
+        let swapped = ScrollSettings {
+            swap_axes: true,
+            ..ScrollSettings::default()
+        };
+        assert_eq!(swapped.transform(ScrollDirection::Up), ScrollDirection::Right);
+        assert_eq!(
+            swapped.transform(ScrollDirection::Left),
+            ScrollDirection::Down
+        );
+
+        let horizontal = ScrollSettings {
+            invert_horizontal: true,
+            ..ScrollSettings::default()
+        };
+        assert_eq!(
+            horizontal.transform(ScrollDirection::Right),
+            ScrollDirection::Left
+        );
+    }
+
+    #[test]
+    fn macro_sanitize_drops_invalid_steps_and_clamps_limits() {
+        let mut config = AppConfig::default();
+        config.profiles[0].mappings.push(Mapping::new(
+            MouseButton::X1,
+            Trigger::SingleClick,
+            Action::Macro {
+                steps: vec![
+                    MacroStep::TapKeys {
+                        keys: vec![" Ctrl ".into(), "".into(), "z".into()],
+                        delay_ms: 999_999,
+                    },
+                    MacroStep::TapKeys {
+                        keys: vec![],
+                        delay_ms: 0,
+                    },
+                ],
+                repeat: 500,
+                interval_ms: 99_999,
+                toggle: false,
+            },
+        ));
+        config.sanitize();
+
+        let action = &config.profiles[0].mappings.last().unwrap().action;
+        match action {
+            Action::Macro {
+                steps,
+                repeat,
+                interval_ms,
+                ..
+            } => {
+                assert_eq!(steps.len(), 1);
+                assert_eq!(*repeat, 1);
+                assert_eq!(*interval_ms, 10_000);
+                match &steps[0] {
+                    MacroStep::TapKeys { keys, delay_ms } => {
+                        assert_eq!(keys, &vec!["ctrl".to_string(), "z".to_string()]);
+                        assert_eq!(*delay_ms, 60_000);
+                    }
+                    other => panic!("unexpected step {other:?}"),
+                }
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_media_actions_are_removed() {
+        let mut config = AppConfig::default();
+        config.profiles[0].mappings.push(Mapping::new(
+            MouseButton::X1,
+            Trigger::SingleClick,
+            Action::Media {
+                key: "not-a-key".into(),
+            },
+        ));
+        let before = config.profiles[0].mappings.len();
+        config.sanitize();
+        assert_eq!(config.profiles[0].mappings.len(), before - 1);
+    }
+
+    #[test]
+    fn macro_repeat_stays_within_the_duration_budget() {
+        let mut config = AppConfig::default();
+        config.profiles[0].mappings.push(Mapping::new(
+            MouseButton::X1,
+            Trigger::SingleClick,
+            Action::Macro {
+                steps: vec![MacroStep::Wait { delay_ms: 1_000 }],
+                repeat: 500,
+                interval_ms: 0,
+                toggle: false,
+            },
+        ));
+        config.sanitize();
+        match &config.profiles[0].mappings.last().unwrap().action {
+            Action::Macro { repeat, .. } => {
+                assert!(*repeat <= 120, "repeat {repeat} exceeds the budget");
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
+
+    #[test]
+    fn macro_json_uses_camel_case_fields() {
+        let step = MacroStep::Wait { delay_ms: 25 };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("\"delayMs\""), "{json}");
+        assert!(!json.contains("delay_ms"), "{json}");
+
+        let action = Action::Macro {
+            steps: vec![step],
+            repeat: 2,
+            interval_ms: 50,
+            toggle: true,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("\"intervalMs\""), "{json}");
+        assert!(!json.contains("interval_ms"), "{json}");
+
+        let round_trip: Action = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip, action);
     }
 }

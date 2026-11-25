@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronRight,
+  Copy,
   MousePointerClick,
   Play,
+  Plus,
   ScanLine,
   Sparkles,
+  Square,
   Trash2,
 } from "lucide-react";
 import { Sheet } from "./Sheet";
@@ -22,18 +27,25 @@ import { cn } from "../lib/cn";
 import { useApp } from "../state/AppContext";
 import { useToast } from "./Toast";
 import {
+  MEDIA_KEYS,
   MOUSE_BUTTONS,
+  WINDOW_ACTIONS,
+  newMacroStep,
   newMapping,
   type Action,
   type CapturePayload,
+  type MacroStep,
+  type MacroStepType,
   type Mapping,
   type MouseButton,
   type ScrollDirection,
   type Trigger,
 } from "../lib/types";
 import {
+  actionLabel,
   buttonLabel,
   keyLabel,
+  macroStepLabel,
   triggerLabel,
   validateMapping,
 } from "../lib/format";
@@ -63,6 +75,26 @@ function defaultAction(type: Action["type"]): Action {
       return { type, button: "left" };
     case "scroll":
       return { type, direction: "down", amount: 3 };
+    case "macro":
+      return {
+        type,
+        steps: [newMacroStep("tapKeys")],
+        repeat: 1,
+        intervalMs: 120,
+        toggle: false,
+      };
+    case "launch":
+      return { type, target: "" };
+    case "typeText":
+      return { type, text: "" };
+    case "media":
+      return { type, key: "mediaplaypause" };
+    case "window":
+      return { type, action: "minimize" };
+    case "toggleKeys":
+      return { type, keys: [] };
+    case "dragLock":
+      return { type, button: "left" };
     case "disable":
     case "none":
       return { type };
@@ -85,8 +117,27 @@ const ACTION_TYPES: Array<{ value: Action["type"]; label: string }> = [
   { value: "mouseClick", label: "Mouse click" },
   { value: "mouseHold", label: "Hold mouse button" },
   { value: "scroll", label: "Scroll" },
+  { value: "macro", label: "Macro (action sequence)" },
+  { value: "launch", label: "Launch a program or URL" },
+  { value: "typeText", label: "Type text" },
+  { value: "media", label: "Media key" },
+  { value: "window", label: "Window action" },
+  { value: "toggleKeys", label: "Toggle keys (sticky)" },
+  { value: "dragLock", label: "Drag lock" },
   { value: "disable", label: "Disable the button" },
   { value: "none", label: "No action" },
+];
+
+const MACRO_STEP_OPTIONS: Array<{ value: MacroStepType; label: string }> = [
+  { value: "tapKeys", label: "Tap keys" },
+  { value: "holdKeys", label: "Hold keys" },
+  { value: "releaseKeys", label: "Release keys" },
+  { value: "wait", label: "Wait" },
+  { value: "mouseClick", label: "Mouse click" },
+  { value: "mouseHold", label: "Mouse hold" },
+  { value: "mouseRelease", label: "Mouse release" },
+  { value: "scroll", label: "Scroll" },
+  { value: "typeText", label: "Type text" },
 ];
 
 export function MappingSheet({
@@ -109,6 +160,7 @@ export function MappingSheet({
     null,
   );
   const [liveModifiers, setLiveModifiers] = useState<string[]>([]);
+  const [newStepType, setNewStepType] = useState<MacroStepType>("tapKeys");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -186,7 +238,11 @@ export function MappingSheet({
               .reverse()
               .find((key) => !["ctrl", "shift", "alt", "win"].includes(key));
             if (primary) setAction({ type: "key", key: primary });
-          } else if (action.type === "shortcut" || action.type === "holdKeys") {
+          } else if (
+            action.type === "shortcut" ||
+            action.type === "holdKeys" ||
+            action.type === "toggleKeys"
+          ) {
             setAction({ ...action, keys: payload.keys });
           }
           setLiveModifiers([]);
@@ -295,6 +351,15 @@ export function MappingSheet({
       const message = errorMessage(caught);
       setError(message);
       toast(message, "error");
+    }
+  };
+
+  const stopMacro = async () => {
+    try {
+      await api.stopMacros();
+      toast("Macro stopped and holds released", "success");
+    } catch (caught) {
+      toast(errorMessage(caught), "error");
     }
   };
 
@@ -584,6 +649,273 @@ export function MappingSheet({
             </div>
           )}
 
+          {action.type === "macro" && (
+            <div className="mt-3 space-y-3">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <Field label="Repeat" hint="1–100 times">
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={action.repeat}
+                    onChange={(event) =>
+                      setAction({
+                        ...action,
+                        repeat: Math.max(
+                          1,
+                          Math.min(100, Number(event.target.value) || 1),
+                        ),
+                      })
+                    }
+                    className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                  />
+                </Field>
+                <Field label="Interval" hint="ms between repeats">
+                  <input
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={action.intervalMs}
+                    onChange={(event) =>
+                      setAction({
+                        ...action,
+                        intervalMs: Math.max(
+                          0,
+                          Math.min(10000, Number(event.target.value) || 0),
+                        ),
+                      })
+                    }
+                    className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                  />
+                </Field>
+                <div className="flex items-end">
+                  <div className="flex h-9 w-full items-center justify-between rounded-[9px] border border-zinc-200 px-3 dark:border-white/10">
+                    <span className="text-[12px]">Toggle</span>
+                    <Switch
+                      size="sm"
+                      checked={action.toggle}
+                      onChange={(toggle) => setAction({ ...action, toggle })}
+                      label="Press again to stop the macro"
+                    />
+                  </div>
+                </div>
+              </div>
+              {action.toggle && (
+                <p className="text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                  Pressing the same button again stops the macro and releases
+                  everything it holds. The panic hotkey always stops it too.
+                </p>
+              )}
+
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[12px] font-medium">
+                    Steps · {action.steps.length}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={newStepType}
+                      onChange={(event) =>
+                        setNewStepType(event.target.value as MacroStepType)
+                      }
+                      className="focus-ring h-7 rounded-lg border border-zinc-200 bg-white px-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                    >
+                      {MACRO_STEP_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      icon={<Plus />}
+                      onClick={() =>
+                        setAction({
+                          ...action,
+                          steps: [...action.steps, newMacroStep(newStepType)],
+                        })
+                      }
+                    >
+                      Add step
+                    </Button>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {action.steps.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-zinc-200 px-3 py-5 text-center text-[11.5px] text-zinc-400 dark:border-white/10">
+                      Add the first step above. Steps run in order, top to bottom.
+                    </div>
+                  ) : (
+                    action.steps.map((step, index) => (
+                      <MacroStepRow
+                        key={index}
+                        step={step}
+                        index={index}
+                        total={action.steps.length}
+                        onChange={(next) =>
+                          setAction({
+                            ...action,
+                            steps: action.steps.map((candidate, position) =>
+                              position === index ? next : candidate,
+                            ),
+                          })
+                        }
+                        onMove={(direction) => {
+                          const target = index + direction;
+                          if (target < 0 || target >= action.steps.length) return;
+                          const steps = [...action.steps];
+                          [steps[index], steps[target]] = [
+                            steps[target],
+                            steps[index],
+                          ];
+                          setAction({ ...action, steps });
+                        }}
+                        onDuplicate={() =>
+                          setAction({
+                            ...action,
+                            steps: [
+                              ...action.steps.slice(0, index + 1),
+                              { ...step },
+                              ...action.steps.slice(index + 1),
+                            ],
+                          })
+                        }
+                        onRemove={() =>
+                          setAction({
+                            ...action,
+                            steps: action.steps.filter(
+                              (_, position) => position !== index,
+                            ),
+                          })
+                        }
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {action.type === "launch" && (
+            <div className="mt-3">
+              <Field
+                label="Target"
+                hint="A program, file, folder or URL. Windows opens it with the default handler."
+              >
+                <input
+                  value={action.target}
+                  maxLength={1000}
+                  onChange={(event) =>
+                    setAction({ ...action, target: event.target.value })
+                  }
+                  placeholder="notepad.exe  ·  https://example.com  ·  C:\folder"
+                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 font-mono text-[12px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+                />
+              </Field>
+              <Callout tone="warning" className="mt-3">
+                Launch actions run with your user account. Profiles imported from
+                elsewhere ask for confirmation before any target is saved.
+              </Callout>
+            </div>
+          )}
+
+          {action.type === "typeText" && (
+            <div className="mt-3">
+              <Field
+                label="Text"
+                hint="Typed as Unicode, so non-Latin characters work. Add a wait or click step first if focus may change."
+              >
+                <textarea
+                  value={action.text}
+                  maxLength={2000}
+                  rows={3}
+                  onChange={(event) =>
+                    setAction({ ...action, text: event.target.value })
+                  }
+                  placeholder="Text to type into the focused window"
+                  className="focus-ring w-full resize-y rounded-[9px] border border-zinc-200 bg-white px-3 py-2 text-[12.5px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+                />
+              </Field>
+            </div>
+          )}
+
+          {action.type === "media" && (
+            <div className="mt-3">
+              <Field label="Media key">
+                <Select
+                  value={action.key}
+                  onChange={(event) =>
+                    setAction({
+                      ...action,
+                      key: event.target.value,
+                    })
+                  }
+                >
+                  {MEDIA_KEYS.map((entry) => (
+                    <option key={entry.value} value={entry.value}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          )}
+
+          {action.type === "window" && (
+            <div className="mt-3">
+              <Field label="Window action" hint="Applies to the window in front.">
+                <Segmented
+                  value={action.action}
+                  onChange={(windowAction) =>
+                    setAction({ ...action, action: windowAction })
+                  }
+                  options={WINDOW_ACTIONS}
+                />
+              </Field>
+            </div>
+          )}
+
+          {action.type === "toggleKeys" && (
+            <div className="mt-3">
+              <KeySelector
+                mode="combo"
+                keys={action.keys}
+                onChange={(keys) => setAction({ ...action, keys })}
+                onRecord={() => {
+                  setLiveModifiers([]);
+                  setCaptureTarget("keys");
+                }}
+                recording={captureTarget === "keys"}
+              />
+              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                The first press holds the keys down, the next press releases
+                them. The panic hotkey releases everything.
+              </p>
+            </div>
+          )}
+
+          {action.type === "dragLock" && (
+            <div className="mt-3">
+              <Field label="Button to hold">
+                <Segmented
+                  value={action.button}
+                  onChange={(mouseButton) =>
+                    setAction({ ...action, button: mouseButton })
+                  }
+                  options={MOUSE_BUTTONS.map((candidate) => ({
+                    value: candidate,
+                    label: buttonLabel(candidate),
+                  }))}
+                />
+              </Field>
+              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                Press once to keep the button held (handy for dragging), press
+                again to release it.
+              </p>
+            </div>
+          )}
+
           {action.type === "disable" && (
             <Callout tone="warning" className="mt-3">
               The button will be consumed and do nothing at all. Use “No action”
@@ -651,9 +983,208 @@ export function MappingSheet({
           >
             Test
           </Button>
+          {action.type === "macro" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<Square />}
+              onClick={stopMacro}
+              title="Stop every running macro and release the keys and buttons it holds."
+            >
+              Stop
+            </Button>
+          )}
         </span>
       </div>
     </Sheet>
+  );
+}
+
+function MacroStepRow({
+  step,
+  index,
+  total,
+  onChange,
+  onMove,
+  onDuplicate,
+  onRemove,
+}: {
+  step: MacroStep;
+  index: number;
+  total: number;
+  onChange: (step: MacroStep) => void;
+  onMove: (direction: 1 | -1) => void;
+  onDuplicate: () => void;
+  onRemove: () => void;
+}) {
+  const isKeyStep =
+    step.type === "tapKeys" ||
+    step.type === "holdKeys" ||
+    step.type === "releaseKeys";
+
+  return (
+    <div className="rounded-xl border border-zinc-200/80 dark:border-white/[0.08]">
+      <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-1.5 dark:border-white/[0.05]">
+        <span className="grid size-5 shrink-0 place-items-center rounded-full bg-zinc-100 text-[10px] font-semibold text-zinc-500 dark:bg-white/[0.06] dark:text-zinc-400">
+          {index + 1}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
+          {macroStepLabel(step)}
+        </span>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => onMove(-1)}
+          disabled={index === 0}
+          title="Move step up"
+          aria-label="Move step up"
+        >
+          <ArrowUp className="size-3" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => onMove(1)}
+          disabled={index === total - 1}
+          title="Move step down"
+          aria-label="Move step down"
+        >
+          <ArrowDown className="size-3" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={onDuplicate}
+          title="Duplicate step"
+          aria-label="Duplicate step"
+        >
+          <Copy className="size-3" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+          onClick={onRemove}
+          title="Remove step"
+          aria-label="Remove step"
+        >
+          <Trash2 className="size-3" />
+        </Button>
+      </div>
+
+      <div className="space-y-2 px-3 py-2.5">
+        {isKeyStep && (
+          <KeySelector
+            mode="combo"
+            keys={step.keys}
+            onChange={(keys) => onChange({ ...step, keys })}
+          />
+        )}
+
+        {step.type === "wait" && (
+          <Field label="Wait" hint="milliseconds, 1–60000">
+            <input
+              type="number"
+              min={1}
+              max={60000}
+              value={step.delayMs}
+              onChange={(event) =>
+                onChange({
+                  ...step,
+                  delayMs: Math.max(
+                    1,
+                    Math.min(60000, Number(event.target.value) || 1),
+                  ),
+                })
+              }
+              className="focus-ring h-8 w-32 rounded-[8px] border border-zinc-200 bg-white px-2.5 text-[12px] dark:border-white/10 dark:bg-white/[0.04]"
+            />
+          </Field>
+        )}
+
+        {(step.type === "mouseClick" ||
+          step.type === "mouseHold" ||
+          step.type === "mouseRelease") && (
+          <Segmented
+            value={step.button}
+            onChange={(button) => onChange({ ...step, button })}
+            options={MOUSE_BUTTONS.map((candidate) => ({
+              value: candidate,
+              label: buttonLabel(candidate),
+            }))}
+          />
+        )}
+
+        {step.type === "scroll" && (
+          <div className="grid gap-2 sm:grid-cols-[1fr_110px]">
+            <Segmented
+              value={step.direction}
+              onChange={(direction) => onChange({ ...step, direction })}
+              options={(
+                ["up", "down", "left", "right"] as ScrollDirection[]
+              ).map((direction) => ({
+                value: direction,
+                label: direction.charAt(0).toUpperCase() + direction.slice(1),
+              }))}
+            />
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={step.amount}
+              onChange={(event) =>
+                onChange({
+                  ...step,
+                  amount: Math.max(
+                    1,
+                    Math.min(50, Number(event.target.value) || 1),
+                  ),
+                })
+              }
+              className="focus-ring h-8 rounded-[8px] border border-zinc-200 bg-white px-2.5 text-[12px] dark:border-white/10 dark:bg-white/[0.04]"
+            />
+          </div>
+        )}
+
+        {step.type === "typeText" && (
+          <textarea
+            value={step.text}
+            maxLength={2000}
+            rows={2}
+            onChange={(event) => onChange({ ...step, text: event.target.value })}
+            placeholder="Text to type"
+            className="focus-ring w-full resize-y rounded-[8px] border border-zinc-200 bg-white px-2.5 py-1.5 text-[12px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+          />
+        )}
+
+        {step.type !== "wait" && (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+              Delay after
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={60000}
+              value={step.delayMs}
+              onChange={(event) =>
+                onChange({
+                  ...step,
+                  delayMs: Math.max(
+                    0,
+                    Math.min(60000, Number(event.target.value) || 0),
+                  ),
+                })
+              }
+              className="focus-ring h-7 w-24 rounded-[7px] border border-zinc-200 bg-white px-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
+            />
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+              ms
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -677,6 +1208,17 @@ function ActionPreview({ action }: { action: Action }) {
         Scroll {action.direction} ×{action.amount}
       </span>
     );
+  }
+  if (
+    action.type === "macro" ||
+    action.type === "launch" ||
+    action.type === "typeText" ||
+    action.type === "media" ||
+    action.type === "window" ||
+    action.type === "toggleKeys" ||
+    action.type === "dragLock"
+  ) {
+    return <span>{actionLabel(action)}</span>;
   }
   if (action.type === "disable") return <span>Disabled</span>;
   return <span>No action</span>;

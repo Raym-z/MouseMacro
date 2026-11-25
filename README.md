@@ -49,7 +49,23 @@ runs locally: no telemetry, no network calls, no background services.
 - Hold keys until the source button is released
 - Mouse click / mouse button hold
 - Scroll by a number of notches
+- **Macro** — ordered steps with tap/hold/release keys, waits, mouse clicks and
+  holds, scrolling and typed text; repeat with an interval or toggle to stop
+- **Launch** a program, file, folder or URL
+- **Type text** (Unicode-safe, including non-Latin characters)
+- Media keys (play/pause, next, previous, volume, mute)
+- Window actions (minimize, maximize, restore, close, snap left/right)
+- Sticky **toggle keys** and **drag lock**
 - Disable the button (consume it silently) or explicit "no action"
+
+### Scroll
+- Invert vertical and/or horizontal scrolling.
+- Swap axes when a driver reports the wrong wheel direction.
+- Send 1–5 notches per physical notch, with optional experimental acceleration.
+- Per-application overrides, so a game can keep normal scrolling while the
+  desktop is inverted.
+- Only physical wheel events are transformed; MouseMacro's own injected scroll
+  is tagged and never remapped.
 
 ### Choosing keys
 Two independent paths, both usable offline:
@@ -169,7 +185,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 77 engine/config/hook/service tests
+npm run test:rust   # 87 engine/config/hook/service tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -189,11 +205,15 @@ low-level mouse hook ──► EngineService ──► pure engine ──► eff
   long press / double click deadlines, and executes effects.
 - `engine/` — UI-independent rules, state and timing. Deterministic and fully
   unit-tested.
-- `platform/simulate.rs` — `SendInput` shortcuts, clicks, holds and wheel
-  scrolling, tagged with `INJECTION_TAG` so the hook ignores them.
+- `platform/simulate.rs` — `SendInput` shortcuts, clicks, holds, Unicode text,
+  wheel scrolling, media keys, window actions and shell launches, tagged with
+  `INJECTION_TAG` so the hook ignores them.
+- `platform/service.rs` — adapts raw events to engine input, applies per-app
+  wheel transforms, runs the timer for long press / double click deadlines, and
+  executes effects including cancellable macros.
 - `state.rs` — configuration, validation, snapshots and window control.
 - `src/` — React UI: Dashboard, Button mappings, Layers, Profiles, Exceptions,
-  Settings, About.
+  Scroll, Settings, About.
 
 ## Configuration
 
@@ -202,7 +222,7 @@ atomically. Shape:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "settings": {
     "enabled": true,
     "launchAtStartup": false,
@@ -213,7 +233,14 @@ atomically. Shape:
     "doubleClickMs": 280,
     "rulePriority": ["gesture", "longPress", "doubleClick", "release", "singleClick"],
     "panicHotkey": ["ctrl", "alt", "shift", "f12"],
-    "onboarded": true
+    "onboarded": true,
+    "scroll": {
+      "invertVertical": false,
+      "invertHorizontal": false,
+      "swapAxes": false,
+      "speed": 1,
+      "acceleration": false
+    }
   },
   "profiles": [
     {
@@ -296,15 +323,12 @@ src-tauri/src/
 
 ## Roadmap
 
-1.2 added layers, application exceptions, the emergency stop, the mapping
-workflow and full backups. The remaining input-suite work is:
+1.3 added macros, launch/text/media/window actions, sticky toggles, drag lock and
+the Scroll tab. The remaining input-suite work is:
 
-1. **Scroll** (1.3) — invert/swap axes, wheel lines, accelerated scrolling and
-   per-app overrides.
-2. **Macros** (1.3) — step sequences, repeat/toggle, launch/text/media actions.
-3. **Mouse** (1.4) — Windows pointer speed, acceleration, primary button and
+1. **Mouse** (1.4) — Windows pointer speed, acceleration, primary button and
    double-click time, with snapshot/restore.
-4. **Keyboard** (1.4) — key remapping, repeat delay/rate and per-app rules,
+2. **Keyboard** (1.4) — key remapping, repeat delay/rate and per-app rules,
    opt-in because it requires an always-on keyboard hook.
 
 OS-level changes will snapshot and restore original Windows values, with explicit

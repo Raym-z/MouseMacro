@@ -16,8 +16,47 @@ export type Action =
   | { type: "mouseClick"; button: MouseButton }
   | { type: "mouseHold"; button: MouseButton }
   | { type: "scroll"; direction: ScrollDirection; amount: number }
+  | {
+      type: "macro";
+      steps: MacroStep[];
+      repeat: number;
+      intervalMs: number;
+      toggle: boolean;
+    }
+  | { type: "launch"; target: string }
+  | { type: "typeText"; text: string }
+  | { type: "media"; key: string }
+  | { type: "window"; action: WindowAction }
+  | { type: "toggleKeys"; keys: string[] }
+  | { type: "dragLock"; button: MouseButton }
   | { type: "disable" }
   | { type: "none" };
+
+export type WindowAction =
+  | "minimize"
+  | "maximize"
+  | "restore"
+  | "close"
+  | "snapLeft"
+  | "snapRight";
+
+export type MacroStep =
+  | { type: "tapKeys"; keys: string[]; delayMs: number }
+  | { type: "holdKeys"; keys: string[]; delayMs: number }
+  | { type: "releaseKeys"; keys: string[]; delayMs: number }
+  | { type: "wait"; delayMs: number }
+  | { type: "mouseClick"; button: MouseButton; delayMs: number }
+  | { type: "mouseHold"; button: MouseButton; delayMs: number }
+  | { type: "mouseRelease"; button: MouseButton; delayMs: number }
+  | {
+      type: "scroll";
+      direction: ScrollDirection;
+      amount: number;
+      delayMs: number;
+    }
+  | { type: "typeText"; text: string; delayMs: number };
+
+export type MacroStepType = MacroStep["type"];
 
 export interface Mapping {
   id: string;
@@ -46,12 +85,24 @@ export interface Profile {
 
 export type ExceptionMode = "always" | "disable" | "profile";
 
+export interface ScrollSettings {
+  invertVertical: boolean;
+  invertHorizontal: boolean;
+  swapAxes: boolean;
+  /** Wheel notches sent per physical notch, 1–5. */
+  speed: number;
+  /** Experimental time-based acceleration. */
+  acceleration: boolean;
+}
+
 export interface ExceptionRule {
   id: string;
   process: string;
   mode: ExceptionMode;
   profileId: string | null;
   enabled: boolean;
+  /** Optional wheel override; null inherits the global setting. */
+  scroll: ScrollSettings | null;
 }
 
 export type RuleCategory =
@@ -78,6 +129,7 @@ export interface Settings {
   panicHotkey: string[];
   /** False on a fresh install; the guided setup sets it to true. */
   onboarded: boolean;
+  scroll: ScrollSettings;
 }
 
 export interface InputSample {
@@ -162,6 +214,7 @@ export type View =
   | "layers"
   | "profiles"
   | "exceptions"
+  | "scroll"
   | "settings"
   | "about";
 
@@ -172,6 +225,54 @@ export const MOUSE_BUTTONS: MouseButton[] = [
   "x1",
   "x2",
 ];
+
+export const MEDIA_KEYS: Array<{ value: string; label: string }> = [
+  { value: "mediaplaypause", label: "Play / Pause" },
+  { value: "medianext", label: "Next track" },
+  { value: "mediaprev", label: "Previous track" },
+  { value: "mediastop", label: "Stop" },
+  { value: "volumeup", label: "Volume up" },
+  { value: "volumedown", label: "Volume down" },
+  { value: "volumemute", label: "Mute" },
+];
+
+export const WINDOW_ACTIONS: Array<{ value: WindowAction; label: string }> = [
+  { value: "minimize", label: "Minimize" },
+  { value: "maximize", label: "Maximize" },
+  { value: "restore", label: "Restore" },
+  { value: "close", label: "Close" },
+  { value: "snapLeft", label: "Snap left" },
+  { value: "snapRight", label: "Snap right" },
+];
+
+export function defaultScroll(): ScrollSettings {
+  return {
+    invertVertical: false,
+    invertHorizontal: false,
+    swapAxes: false,
+    speed: 1,
+    acceleration: false,
+  };
+}
+
+export function newMacroStep(type: MacroStepType): MacroStep {
+  switch (type) {
+    case "tapKeys":
+    case "holdKeys":
+    case "releaseKeys":
+      return { type, keys: [], delayMs: 60 };
+    case "wait":
+      return { type, delayMs: 250 };
+    case "mouseClick":
+    case "mouseHold":
+    case "mouseRelease":
+      return { type, button: "left", delayMs: 60 };
+    case "scroll":
+      return { type, direction: "down", amount: 3, delayMs: 60 };
+    case "typeText":
+      return { type, text: "", delayMs: 60 };
+  }
+}
 
 export const DEFAULT_ACTION: Action = { type: "shortcut", keys: [] };
 

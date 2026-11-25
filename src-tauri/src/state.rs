@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::model::{
-    Action, AppConfig, ExceptionMode, ExceptionRule, Layer, Mapping, Profile, Settings, Theme,
-    Trigger,
+    is_media_key, Action, AppConfig, ExceptionMode, ExceptionRule, Layer, MacroStep, Mapping,
+    Profile, Settings, Theme, Trigger,
 };
 use crate::config::store::ConfigStore;
 use crate::engine::keys::{normalize_combo, vk_from_name};
@@ -664,8 +664,23 @@ impl AppState {
         Ok(())
     }
 
-    pub fn import_profile(&self, path: &std::path::Path) -> Result<Snapshot, String> {
+    pub fn inspect_profile_import(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<String>, String> {
+        let profile = self.store.read_profile(path)?;
+        Ok(collect_launch_targets(&profile))
+    }
+
+    pub fn import_profile(&self, path: &std::path::Path, allow_launch: bool) -> Result<Snapshot, String> {
         let mut imported = self.store.read_profile(path)?;
+        let launches = collect_launch_targets(&imported);
+        if !launches.is_empty() && !allow_launch {
+            return Err(format!(
+                "This profile would run: {}. Confirm the import to allow launch actions.",
+                launches.join(", ")
+            ));
+        }
         imported.id = uuid::Uuid::new_v4().to_string();
         for mapping in &mut imported.mappings {
             mapping.id = uuid::Uuid::new_v4().to_string();
@@ -792,6 +807,18 @@ impl AppState {
     }
 }
 
+fn collect_launch_targets(profile: &Profile) -> Vec<String> {
+    profile
+        .mappings
+        .iter()
+        .chain(profile.layers.iter().flat_map(|layer| layer.mappings.iter()))
+        .filter_map(|mapping| match &mapping.action {
+            Action::Launch { target } => Some(target.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn validate_profile_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -874,12 +901,131 @@ pub fn validate_action(action: &mut Action) -> Result<(), String> {
                 return Err("Scroll amount must be between 1 and 50.".into());
             }
         }
-        Action::MouseClick { .. }
+        Action::Macro {
+            steps,
+            repeat,
+            interval_ms,
+            toggle: _,
+        } => {
+            if steps.is_empty() {
+                return Err("Add at least one step to the macro.".into());
+            }
+            if steps.len() > 40 {
+                return Err("A macro can contain at most 40 steps.".into());
+            }
+            if !(1..=100).contains(repeat) {
+                return Err("Macro repeat must be between 1 and 100.".into());
+            }
+            if *interval_ms > 10_000 {
+                return Err("The macro repeat interval can be at most 10000 ms.".into());
+            }
+            let mut step_ms: u64 = 0;
+            for step in steps.iter_mut() {
+                step_ms = step_ms.saturating_add(validate_step(step)?);
+            }
+            let cycles = *repeat as u64;
+            let total = step_ms
+                .saturating_mul(cycles)
+                .saturating_add(interval_ms.saturating_mul(cycles.saturating_sub(1)));
+            if total > 120_000 {
+                return Err(
+                    "This macro would run for more than two minutes. Shorten the steps or the repeat count."
+                        .into(),
+                );
+            }
+        }
+        Action::Launch { target } => {
+            *target = target.trim().to_string();
+            if target.is_empty() {
+                return Err("Enter a program, file, folder or URL to launch.".into());
+            }
+            if target.chars().count() > 1_000 {
+                return Err("The launch target is too long.".into());
+            }
+        }
+        Action::TypeText { text } => {
+            if text.chars().count() > 2_000 {
+                return Err("A macro can type at most 2000 characters at once.".into());
+            }
+            if text.is_empty() {
+                return Err("Enter the text to type.".into());
+            }
+        }
+        Action::Media { key } => {
+            let normalized = key.trim().to_lowercase();
+            if !is_media_key(&normalized) {
+                return Err(format!("Unknown media key “{key}”."));
+            }
+            *key = normalized;
+        }
+        Action::ToggleKeys { keys } => {
+            *keys = normalize_combo(keys);
+            if keys.is_empty() {
+                return Err("Choose at least one key to toggle.".into());
+            }
+            if keys.len() > 4 {
+                return Err("A toggle can contain at most 4 keys.".into());
+            }
+            if let Some(unknown) = keys.iter().find(|key| vk_from_name(key).is_none()) {
+                return Err(format!("Unknown key “{unknown}”."));
+            }
+        }
+        Action::Window { .. }
+        | Action::DragLock { .. }
+        | Action::MouseClick { .. }
         | Action::MouseHold { .. }
         | Action::Disable
         | Action::None => {}
     }
     Ok(())
+}
+
+/// Validates a macro step and returns the pause it contributes to the macro's
+/// estimated duration.
+fn validate_step(step: &mut MacroStep) -> Result<u64, String> {
+    match step {
+        MacroStep::TapKeys { keys, delay_ms }
+        | MacroStep::HoldKeys { keys, delay_ms }
+        | MacroStep::ReleaseKeys { keys, delay_ms } => {
+            *keys = normalize_combo(keys);
+            if keys.is_empty() {
+                return Err("A macro key step needs at least one key.".into());
+            }
+            if keys.len() > 8 {
+                return Err("A macro key step can contain at most 8 keys.".into());
+            }
+            if let Some(unknown) = keys.iter().find(|key| vk_from_name(key).is_none()) {
+                return Err(format!("Unknown key “{unknown}”."));
+            }
+            *delay_ms = (*delay_ms).min(60_000);
+        }
+        MacroStep::Wait { delay_ms } => {
+            *delay_ms = (*delay_ms).clamp(1, 60_000);
+        }
+        MacroStep::MouseClick { delay_ms, .. }
+        | MacroStep::MouseHold { delay_ms, .. }
+        | MacroStep::MouseRelease { delay_ms, .. } => {
+            *delay_ms = (*delay_ms).min(60_000);
+        }
+        MacroStep::Scroll {
+            amount, delay_ms, ..
+        } => {
+            if !(1..=50).contains(amount) {
+                return Err("Macro scroll amount must be between 1 and 50.".into());
+            }
+            *delay_ms = (*delay_ms).min(60_000);
+        }
+        MacroStep::TypeText { text, delay_ms } => {
+            if text.is_empty() {
+                return Err("A text step needs some text.".into());
+            }
+            if text.chars().count() > 2_000 {
+                return Err("A text step can type at most 2000 characters.".into());
+            }
+            *delay_ms = (*delay_ms).min(60_000);
+        }
+    }
+    Ok(step.delay_ms())
 }
 
 fn validate_layer(layer: &mut Layer) -> Result<(), String> {
@@ -901,4 +1047,61 @@ fn validate_layer(layer: &mut Layer) -> Result<(), String> {
         validate_mapping(mapping)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::MacroStep;
+
+    #[test]
+    fn macro_validation_rejects_empty_and_overlong_sequences() {
+        let mut empty = Action::Macro {
+            steps: vec![],
+            repeat: 1,
+            interval_ms: 0,
+            toggle: false,
+        };
+        assert!(validate_action(&mut empty).is_err());
+
+        let mut too_long = Action::Macro {
+            steps: vec![MacroStep::Wait { delay_ms: 60_000 }; 3],
+            repeat: 10,
+            interval_ms: 0,
+            toggle: false,
+        };
+        assert!(validate_action(&mut too_long).is_err());
+
+        let mut valid = Action::Macro {
+            steps: vec![MacroStep::TapKeys {
+                keys: vec!["ctrl".into(), "z".into()],
+                delay_ms: 10,
+            }],
+            repeat: 2,
+            interval_ms: 100,
+            toggle: true,
+        };
+        assert!(validate_action(&mut valid).is_ok());
+    }
+
+    #[test]
+    fn launch_media_and_toggle_validation() {
+        let mut launch = Action::Launch {
+            target: "   ".into(),
+        };
+        assert!(validate_action(&mut launch).is_err());
+
+        let mut media = Action::Media {
+            key: "bogus".into(),
+        };
+        assert!(validate_action(&mut media).is_err());
+
+        let mut toggle = Action::ToggleKeys {
+            keys: vec!["Ctrl".into(), "Shift".into()],
+        };
+        assert!(validate_action(&mut toggle).is_ok());
+        assert_eq!(toggle, Action::ToggleKeys {
+            keys: vec!["ctrl".into(), "shift".into()],
+        });
+    }
 }
