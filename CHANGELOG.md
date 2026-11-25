@@ -4,6 +4,42 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.6.0] — 2026-11-26
+
+Settings search, snappier defaults and layout polish.
+
+### Added
+
+- **Search settings** — a search box in the Settings header with a results
+  list. It matches setting names, descriptions and section keywords (for
+  example `theme`, `backup`, `priority`, `admin`), jumps to the setting, opens
+  its card if it was collapsed, and briefly highlights the row.
+- **200 ms long-press option** — the picker now starts at 200 ms, so faster
+  hardware can use a shorter threshold. The engine has always accepted shorter
+  values; only the menu was limited.
+
+### Changed
+
+- **Gesture timing defaults** — long press is now **300 ms** and the
+  double-click window **200 ms** (previously 400 / 280). The Dashboard's
+  Gesture timing card shows the same values.
+- **One-time timing migration** — configurations that still have both old
+  defaults (400 / 280) move to the new values on upgrade. A customised value is
+  never overwritten.
+- Configuration schema is now **v6** (timing migration only).
+
+### Fixed
+
+- The About page's **Configuration** and **Safety behaviour** cards now split
+  the row evenly like the cards above them, instead of 1.2 / 1.
+- The Settings search understands section-level terms even when a section has
+  no individual rows (theme, backup, diagnostics, elevation, and similar).
+
+### Tests
+
+- 123 Rust tests, including the timing-default migration and the existing
+  combined, keyboard, wheel and capture coverage.
+
 ## [1.5.0] — 2026-11-25
 
 Several actions per mapping, and Settings polish.

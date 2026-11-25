@@ -220,7 +220,7 @@ export function AboutPage() {
         </section>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_1fr]">
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <section className="surface rounded-2xl p-5">
           <h3 className="flex items-center gap-2 text-[13px] font-semibold">
             <ScrollText className="size-4 text-zinc-400" />

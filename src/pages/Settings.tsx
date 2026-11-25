@@ -1,4 +1,11 @@
-import { useEffect, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Activity,
   ArrowDown,
@@ -14,6 +21,7 @@ import {
   Palette,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -21,6 +29,7 @@ import {
   Sun,
   Timer,
   Upload,
+  X,
   Zap,
 } from "lucide-react";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
@@ -43,13 +52,36 @@ import {
 import type { BackupInfo, RuleCategory, Settings } from "../lib/types";
 import { cn } from "../lib/cn";
 
-const LONG_PRESS_OPTIONS = [250, 300, 350, 400, 450, 500, 600, 700, 800];
+const LONG_PRESS_OPTIONS = [200, 250, 300, 350, 400, 450, 500, 600, 700, 800];
 const DOUBLE_CLICK_OPTIONS = [150, 200, 250, 280, 320, 350, 400, 450, 500];
 const RELEASE_CATEGORIES: RuleCategory[] = [
   "doubleClick",
   "release",
   "singleClick",
 ];
+
+interface CardChrome {
+  isOpen: (key: string) => boolean;
+  toggle: (key: string) => void;
+}
+
+const CardChromeContext = createContext<CardChrome | null>(null);
+
+interface SearchEntry {
+  elementId: string;
+  title: string;
+  description: string;
+  section: string;
+  cardKey: string;
+  kind: "card" | "row";
+}
+
+const slugify = (text: string) =>
+  text
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 
 export function SettingsPage() {
   const { snapshot, runSnapshot, run } = useApp();
@@ -65,6 +97,99 @@ export function SettingsPage() {
   const [importing, setImporting] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState<BackupInfo | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [search, setSearch] = useState("");
+  const [searchIndex, setSearchIndex] = useState<SearchEntry[]>([]);
+  const [openCards, setOpenCards] = useState<Record<string, boolean>>({});
+  const [jumpTo, setJumpTo] = useState<string | null>(null);
+  const searchRoot = useRef<HTMLDivElement>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+
+  const query = search.trim().toLowerCase();
+  const results = useMemo(() => {
+    if (!query) return [];
+    return searchIndex
+      .filter((entry) =>
+        `${entry.title} ${entry.description} ${entry.section}`
+          .toLowerCase()
+          .includes(query),
+      )
+      .slice(0, 8);
+  }, [query, searchIndex]);
+
+  // The index is collected once while every card is open, so searching still
+  // finds settings inside a card the user collapsed earlier.
+  useEffect(() => {
+    const root = searchRoot.current;
+    if (!root) return;
+    const entries: SearchEntry[] = [];
+    for (const card of root.querySelectorAll<HTMLElement>("[data-setting-card]")) {
+      const section = card.dataset.settingTitle ?? "";
+      const cardKey = slugify(section);
+      entries.push({
+        elementId: card.id,
+        title: section,
+        description: card.dataset.settingDescription ?? "",
+        section,
+        cardKey,
+        kind: "card",
+      });
+      for (const row of card.querySelectorAll<HTMLElement>("[data-setting-row]")) {
+        entries.push({
+          elementId: row.id,
+          title: row.dataset.settingTitle ?? "",
+          description: row.dataset.settingDescription ?? "",
+          section,
+          cardKey,
+          kind: "row",
+        });
+      }
+    }
+    setSearchIndex(entries);
+  }, []);
+
+  useEffect(() => {
+    if (!query) return;
+    const handler = (event: MouseEvent) => {
+      if (!searchBoxRef.current?.contains(event.target as Node)) {
+        setSearch("");
+      }
+    };
+    window.addEventListener("mousedown", handler);
+    return () => window.removeEventListener("mousedown", handler);
+  }, [query]);
+
+  useEffect(() => {
+    if (!jumpTo) return;
+    const element = document.getElementById(jumpTo);
+    if (!element) {
+      setJumpTo(null);
+      return;
+    }
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    element.animate(
+      [
+        { backgroundColor: "rgba(99, 102, 241, 0.16)" },
+        { backgroundColor: "rgba(99, 102, 241, 0)" },
+      ],
+      { duration: 1_800, easing: "ease-out" },
+    );
+    setJumpTo(null);
+  }, [jumpTo]);
+
+  const chrome: CardChrome = {
+    isOpen: (key) => openCards[key] !== false,
+    toggle: (key) =>
+      setOpenCards((current) => ({
+        ...current,
+        [key]: current[key] === false,
+      })),
+  };
+
+  const goTo = (entry: SearchEntry) => {
+    setOpenCards((current) => ({ ...current, [entry.cardKey]: true }));
+    setSearch("");
+    setJumpTo(entry.elementId);
+  };
 
   const refreshBackups = async () => {
     try {
@@ -237,18 +362,82 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="animate-in">
-      <PageHeader
-        eyebrow="Preferences"
-        title="Settings"
-        description="Control startup behaviour, appearance, timing and the input engine."
-      />
+    <CardChromeContext.Provider value={chrome}>
+      <div className="animate-in">
+        <PageHeader
+          eyebrow="Preferences"
+          title="Settings"
+          description="Control startup behaviour, appearance, timing and the input engine."
+          actions={
+            <div ref={searchBoxRef} className="relative w-[240px] max-w-full">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && results[0]) {
+                    event.preventDefault();
+                    goTo(results[0]);
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSearch("");
+                  }
+                }}
+                placeholder="Search settings…"
+                aria-label="Search settings"
+                className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white pl-8 pr-8 text-[12.5px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="Clear search"
+                  className="focus-ring absolute right-1.5 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded text-zinc-400 transition hover:text-zinc-700 dark:hover:text-zinc-200"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+              {query && (
+                <div className="absolute right-0 top-full z-50 mt-2 w-[340px] overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl dark:border-white/10 dark:bg-[#141416]">
+                  {results.length === 0 ? (
+                    <p className="px-3 py-3 text-[11.5px] text-zinc-400 dark:text-zinc-500">
+                      No settings match “{search.trim()}”.
+                    </p>
+                  ) : (
+                    <ul className="max-h-[320px] overflow-y-auto p-1.5">
+                      {results.map((entry) => (
+                        <li key={`${entry.kind}-${entry.elementId}`}>
+                          <button
+                            type="button"
+                            onClick={() => goTo(entry)}
+                            className="flex w-full flex-col rounded-lg px-2.5 py-2 text-left transition hover:bg-zinc-100 dark:hover:bg-white/[0.06]"
+                          >
+                            <span className="text-[12px] font-medium">
+                              {entry.title}
+                            </span>
+                            <span className="mt-0.5 truncate text-[10.5px] text-zinc-400 dark:text-zinc-500">
+                              {entry.kind === "row"
+                                ? `${entry.section}${entry.description ? ` · ${entry.description}` : ""}`
+                                : "Settings section"}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+          }
+        />
 
-      <div className="space-y-4">
+        <div className="space-y-4" ref={searchRoot}>
         <SettingCard
           icon={Settings2}
           title="General"
           description="How MouseMacro behaves with Windows and its window."
+          keywords="startup launch login tray minimize close window behaviour"
         >
           <SettingRow
             title="Launch on Windows startup"
@@ -295,6 +484,7 @@ export function SettingsPage() {
           icon={Palette}
           title="Appearance"
           description="A quiet interface that follows your preference."
+          keywords="theme dark light system colors appearance"
         >
           <div className="grid gap-3 px-4 py-4 sm:grid-cols-3">
             {(
@@ -376,6 +566,7 @@ export function SettingsPage() {
           icon={Zap}
           title="Input engine"
           description="Global mappings, gesture timings and conflict resolution."
+          keywords="timing long press double click gesture rule priority order engine enabled mappings"
         >
           <SettingRow
             title="Global mappings"
@@ -536,6 +727,7 @@ export function SettingsPage() {
           icon={ShieldAlert}
           title="Safety"
           description="An emergency stop you can reach without opening the window."
+          keywords="emergency stop panic hotkey pause resume safety"
         >
           <SettingRow
             title="Emergency stop"
@@ -593,6 +785,7 @@ export function SettingsPage() {
           icon={Activity}
           title="Input diagnostics"
           description="Verify what the input hook really receives. Use this when a mapping does not fire."
+          keywords="diagnostics debug synthetic injected other tools vendor mouse test"
         >
           <SettingRow
             title="Process input from other input tools"
@@ -615,6 +808,7 @@ export function SettingsPage() {
           icon={History}
           title="Backup and restore"
           description="One file contains settings, profiles, layers and application rules."
+          keywords="backup restore export import automatic recovery"
         >
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-4 py-3.5 dark:border-white/[0.055]">
             <Button
@@ -703,6 +897,7 @@ export function SettingsPage() {
           icon={FolderOpen}
           title="Configuration & maintenance"
           description="Local, portable JSON storage. Nothing leaves your machine."
+          keywords="config configuration file folder schema profiles reload administrator admin elevation reset maintenance"
         >
           <div className="px-4 pb-4 pt-3">
             <div className="flex items-center gap-2 text-[12px] font-medium">
@@ -842,7 +1037,8 @@ export function SettingsPage() {
           This cannot be undone. Export any profile you want to keep first.
         </Callout>
       </ConfirmDialog>
-    </div>
+      </div>
+    </CardChromeContext.Provider>
   );
 }
 
@@ -850,21 +1046,33 @@ function SettingCard({
   icon: Icon,
   title,
   description,
+  keywords,
   children,
 }: {
   icon: typeof Settings2;
   title: string;
   description: string;
+  /** Extra search terms for cards whose settings are not individual rows. */
+  keywords?: string;
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(true);
-  const contentId = `settings-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const chrome = useContext(CardChromeContext);
+  const key = slugify(title);
+  const open = chrome ? chrome.isOpen(key) : true;
+  const contentId = `settings-body-${key}`;
+  const searchText = keywords ? `${description} ${keywords}` : description;
 
   return (
-    <section className="surface overflow-hidden rounded-2xl">
+    <section
+      id={`settings-card-${key}`}
+      data-setting-card="true"
+      data-setting-title={title}
+      data-setting-description={searchText}
+      className="surface overflow-hidden rounded-2xl"
+    >
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => chrome?.toggle(key)}
         aria-expanded={open}
         aria-controls={contentId}
         className={cn(
@@ -918,6 +1126,10 @@ function SettingRow({
 }) {
   return (
     <div
+      id={`setting-${slugify(title)}`}
+      data-setting-row="true"
+      data-setting-title={title}
+      data-setting-description={description}
       className={cn(
         "flex items-center justify-between gap-6 px-4 py-3.5",
         !last && "border-b border-zinc-100 dark:border-white/[0.055]",

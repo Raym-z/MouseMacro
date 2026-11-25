@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::engine::keys::{is_modifier_name, normalize_combo, vk_from_name};
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
 
 /// Media keys are sent as their dedicated virtual-key codes. Keeping the list
@@ -648,8 +648,8 @@ impl Default for Settings {
             start_minimized: false,
             close_to_tray: true,
             theme: Theme::System,
-            long_press_ms: 400,
-            double_click_ms: 280,
+            long_press_ms: 300,
+            double_click_ms: 200,
             process_injected_input: false,
             rule_priority: RuleCategory::all(),
             panic_hotkey: default_panic_hotkey(),
@@ -838,6 +838,7 @@ impl AppConfig {
     /// Repairs configs loaded from disk or imported from elsewhere. Returns human-readable notes.
     pub fn sanitize(&mut self) -> Vec<String> {
         let mut notes = Vec::new();
+        let from_version = self.schema_version;
         let migrating = self.schema_version < SCHEMA_VERSION;
         self.settings.sanitize();
         // The emergency stop must always win, so key mappings that would
@@ -954,6 +955,16 @@ impl AppConfig {
         // Existing installs should not see the first-run wizard after upgrading.
         if migrating {
             self.settings.onboarded = true;
+        }
+
+        // 1.6 lowered the default gesture timings. Only touch configurations
+        // that still have both old defaults; a deliberate choice is kept.
+        if from_version < 6
+            && self.settings.long_press_ms == 400
+            && self.settings.double_click_ms == 280
+        {
+            self.settings.long_press_ms = 300;
+            self.settings.double_click_ms = 200;
         }
 
         self.schema_version = SCHEMA_VERSION;
@@ -1274,6 +1285,32 @@ mod tests {
         assert!(!config.settings.keyboard.enabled);
         assert!(!config.settings.keyboard.acknowledged);
         assert!(config.profiles.iter().all(|p| p.key_mappings.is_empty()));
+    }
+
+    #[test]
+    fn upgrading_moves_untouched_timing_defaults_to_the_new_values() {
+        let mut config = AppConfig {
+            schema_version: 5,
+            ..AppConfig::default()
+        };
+        config.settings.long_press_ms = 400;
+        config.settings.double_click_ms = 280;
+        config.sanitize();
+        assert_eq!(config.settings.long_press_ms, 300);
+        assert_eq!(config.settings.double_click_ms, 200);
+    }
+
+    #[test]
+    fn upgrading_keeps_customised_timing() {
+        let mut config = AppConfig {
+            schema_version: 5,
+            ..AppConfig::default()
+        };
+        config.settings.long_press_ms = 500;
+        config.settings.double_click_ms = 280;
+        config.sanitize();
+        assert_eq!(config.settings.long_press_ms, 500);
+        assert_eq!(config.settings.double_click_ms, 280);
     }
 
     #[test]
