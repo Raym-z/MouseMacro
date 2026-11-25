@@ -1,8 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Mapping,
+  Action,
+  BackupInfo,
   CaptureMode,
+  ExceptionRule,
   InputSample,
+  Layer,
+  Mapping,
+  MappingActivity,
+  OpenApp,
   Settings,
   Snapshot,
 } from "./types";
@@ -40,6 +46,76 @@ export const api = {
       mappingId,
       enabled,
     }),
+  duplicateMapping: (profileId: string, mappingId: string) =>
+    invoke<Snapshot>("duplicate_mapping", { profileId, mappingId }),
+  setMappingsEnabled: (
+    profileId: string,
+    mappingIds: string[],
+    enabled: boolean,
+  ) =>
+    invoke<Snapshot>("set_mappings_enabled", {
+      profileId,
+      mappingIds,
+      enabled,
+    }),
+  saveLayer: (profileId: string, layer: Layer) =>
+    invoke<Snapshot>("save_layer", { profileId, layer }),
+  deleteLayer: (profileId: string, layerId: string) =>
+    invoke<Snapshot>("delete_layer", { profileId, layerId }),
+  setLayerEnabled: (profileId: string, layerId: string, enabled: boolean) =>
+    invoke<Snapshot>("set_layer_enabled", {
+      profileId,
+      layerId,
+      enabled,
+    }),
+  saveLayerMapping: (profileId: string, layerId: string, mapping: Mapping) =>
+    invoke<Snapshot>("save_layer_mapping", {
+      profileId,
+      layerId,
+      mapping,
+    }),
+  deleteLayerMapping: (
+    profileId: string,
+    layerId: string,
+    mappingId: string,
+  ) =>
+    invoke<Snapshot>("delete_layer_mapping", {
+      profileId,
+      layerId,
+      mappingId,
+    }),
+  setLayerMappingEnabled: (
+    profileId: string,
+    layerId: string,
+    mappingId: string,
+    enabled: boolean,
+  ) =>
+    invoke<Snapshot>("set_layer_mapping_enabled", {
+      profileId,
+      layerId,
+      mappingId,
+      enabled,
+    }),
+  saveException: (rule: ExceptionRule) =>
+    invoke<Snapshot>("save_exception", { rule }),
+  deleteException: (ruleId: string) =>
+    invoke<Snapshot>("delete_exception", { ruleId }),
+  setExceptionEnabled: (ruleId: string, enabled: boolean) =>
+    invoke<Snapshot>("set_exception_enabled", { ruleId, enabled }),
+  listOpenApps: () => invoke<OpenApp[]>("list_open_apps"),
+  testAction: (action: Action) => invoke<void>("test_action", { action }),
+  getMappingActivity: () =>
+    invoke<MappingActivity[]>("get_mapping_activity"),
+  clearMappingActivity: () => invoke<void>("clear_mapping_activity"),
+  emergencyStop: () => invoke<Snapshot>("emergency_stop"),
+  exportConfig: (path: string) =>
+    invoke<string>("export_config", { path }),
+  importConfig: (path: string) =>
+    invoke<Snapshot>("import_config", { path }),
+  listBackups: () => invoke<BackupInfo[]>("list_backups"),
+  createBackup: () => invoke<BackupInfo>("create_backup"),
+  restoreBackup: (name: string) =>
+    invoke<Snapshot>("restore_backup", { name }),
   importProfile: (path: string) =>
     invoke<Snapshot>("import_profile", { path }),
   exportProfile: (profileId: string, path: string) =>

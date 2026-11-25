@@ -38,7 +38,15 @@ export function useApp(): AppContextValue {
   return context;
 }
 
-const VIEWS: View[] = ["dashboard", "mappings", "profiles", "settings", "about"];
+const VIEWS: View[] = [
+  "dashboard",
+  "mappings",
+  "layers",
+  "profiles",
+  "exceptions",
+  "settings",
+  "about",
+];
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const { toast } = useToast();
@@ -120,6 +128,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (VIEWS.includes(event.payload as View)) {
               setView(event.payload as View);
             }
+          }),
+        );
+        unlisteners.push(
+          await listen<string>("app://panic", (event) => {
+            toast(event.payload, "error");
           }),
         );
 

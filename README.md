@@ -28,6 +28,21 @@ runs locally: no telemetry, no network calls, no background services.
 | Button + button | First button held, second pressed (chord) |
 | Button + wheel | Held while scrolling up / down / left / right |
 
+### Layers
+- Hold a button to activate a second mapping set for the other buttons (and
+  wheel directions defined in the layer).
+- Buttons the layer does not define keep their normal profile mapping.
+- The activator keeps its own tap, double click and long press from the profile.
+- One layer per activator, up to 20 layers per profile.
+
+### Application rules (Exceptions)
+- Per-executable behaviour: pass input through untouched, or switch to another
+  profile while that app is in the foreground.
+- Add from the list of open windows or type an executable name.
+- The foreground watcher also releases synthetic holds when you switch apps, so
+  nothing sticks in the window you left.
+- Rules match the executable name, not a full path.
+
 ### Actions
 - Keyboard shortcut (e.g. `Ctrl + Z`)
 - Single key
@@ -59,14 +74,32 @@ touching Windows APIs:
 - Injected events are tagged and ignored, so mappings cannot recurse.
 - When the engine is disabled, every event passes straight through.
 
+### Mapping workflow
+- Search by button, trigger, action or label.
+- Duplicate a mapping, enable/disable all, and test an action from the editor.
+- Duplicate button + trigger pairs are marked **shadowed** because the engine
+  always uses the first enabled match.
+- Each mapping shows when it last fired.
+
 ### Profiles
 - Create, rename, duplicate and delete profiles.
 - Seeded examples: Default, Productivity, Gaming, Design.
-- Import/export a profile as JSON.
+- Import/export a profile as JSON, or export everything at once.
 - Switch profiles from the sidebar or the tray menu.
 
+### Backup and restore
+- Export/import all settings, profiles, layers and application rules as one
+  versioned JSON file.
+- Ten rotating backups are written before every save; restore one click, and
+  the current state is backed up first.
+- Imported files never change Windows startup integration.
+
 ### Desktop behaviour
-- System tray icon: open, enable/disable, switch profile, exit.
+- **Emergency stop**: global hotkey (default `Ctrl + Alt + Shift + F12`) and a
+  tray item that disable mappings and release every synthetic key or button.
+  Resume from the tray, sidebar or Settings.
+- First-run setup: button detection, starter profile and startup choices.
+- System tray icon: open, enable/disable, switch profile, stop all input, exit.
 - Launch on Windows startup (registry reconciled with config at boot).
 - Start minimized, close-to-tray, light/dark/system themes.
 - Optional relaunch as administrator for elevated applications.
@@ -76,9 +109,11 @@ touching Windows APIs:
   (mouse vendor software, touchpad drivers, remote desktop).
 
 ### Safety
-- Atomic config writes with a timestamped backup of unreadable files.
-- Hook failures are surfaced in the UI, never silently ignored.
+- Atomic config writes with rotating timestamped backups and corrupt-file
+  recovery.
+- Hook and hotkey failures are surfaced in the UI, never silently ignored.
 - Corrupt configuration cannot brick startup; defaults are restored.
+- An app switch or emergency stop releases every synthetic hold.
 
 ---
 
@@ -134,7 +169,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 50 engine/config/hook tests
+npm run test:rust   # 77 engine/config/hook/service tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -157,7 +192,7 @@ low-level mouse hook ──► EngineService ──► pure engine ──► eff
 - `platform/simulate.rs` — `SendInput` shortcuts, clicks, holds and wheel
   scrolling, tagged with `INJECTION_TAG` so the hook ignores them.
 - `state.rs` — configuration, validation, snapshots and window control.
-- `src/` — React UI: Dashboard, Button mappings (sheet editor), Profiles,
+- `src/` — React UI: Dashboard, Button mappings, Layers, Profiles, Exceptions,
   Settings, About.
 
 ## Configuration
@@ -167,7 +202,7 @@ atomically. Shape:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "settings": {
     "enabled": true,
     "launchAtStartup": false,
@@ -176,7 +211,9 @@ atomically. Shape:
     "theme": "system",
     "longPressMs": 400,
     "doubleClickMs": 280,
-    "rulePriority": ["gesture", "longPress", "doubleClick", "release", "singleClick"]
+    "rulePriority": ["gesture", "longPress", "doubleClick", "release", "singleClick"],
+    "panicHotkey": ["ctrl", "alt", "shift", "f12"],
+    "onboarded": true
   },
   "profiles": [
     {
@@ -192,10 +229,28 @@ atomically. Shape:
           "action": { "type": "shortcut", "keys": ["ctrl", "z"] },
           "enabled": true
         }
+      ],
+      "layers": [
+        {
+          "id": "…",
+          "name": "Navigation",
+          "activator": "x1",
+          "enabled": true,
+          "mappings": []
+        }
       ]
     }
   ],
-  "activeProfileId": "…"
+  "activeProfileId": "…",
+  "exceptions": [
+    {
+      "id": "…",
+      "process": "game.exe",
+      "mode": "disable",
+      "profileId": null,
+      "enabled": true
+    }
+  ]
 }
 ```
 
@@ -209,12 +264,14 @@ src/                     React UI
   components/            Sheet editor, key picker, reusable controls
   hooks/useCapture.ts    backend capture bridge
   lib/                   types, formatting, key catalog, API client
-  pages/                 Dashboard, Mappings, Profiles, Settings, About
+  pages/                 Dashboard, Mappings, Layers, Profiles, Exceptions,
+                         Settings, About
   state/                 app context (snapshot, view, run helpers)
 src-tauri/src/
-  config/                model, defaults, atomic store, import/export
-  engine/                pure rule engine + key tables (47 tests)
-  platform/              hooks, service, SendInput, elevation
+  config/                model, defaults, atomic store, backups, import/export
+  engine/                pure rule engine, layers, key tables
+  platform/              hooks, service, foreground watcher, hotkey, SendInput,
+                         elevation
   commands.rs            Tauri command surface
   tray.rs                tray menu
   lib.rs                 setup, plugins, window sizing, shutdown cleanup
@@ -230,19 +287,25 @@ src-tauri/src/
 | Scroll gestures do nothing | Settings → **Input diagnostics**: if wheel rows say `synthetic`, enable *Process input from other input tools*. If they say `horizontal`, the device is a thumb/tilt wheel — map `left`/`right` triggers. |
 | Hand-edited config.json has no effect | Settings → **Reload from disk** (or restart). The running app keeps its in-memory copy. |
 | Shortcuts don't work inside a game | If the game runs elevated, relaunch MouseMacro via *Settings → Run as administrator*. |
+| An application rule does not apply | Check the executable name in **Exceptions**; elevated apps need MouseMacro elevated too. The status chip shows the detected foreground app. |
+| A layer does nothing | The activator must be held; each button can own only one layer; check that the layer and its mappings are enabled. |
+| A mapping is marked *Shadowed* | Another enabled mapping has the same button and trigger. Disable, edit or remove one; the engine uses the first match. |
+| Mappings suddenly stopped | The emergency hotkey (`Ctrl + Alt + Shift + F12`) or tray → *Stop all input* was used. Resume from the sidebar, tray or **Settings → Safety**. |
+| Need an older configuration | **Settings → Backup and restore** → choose a timestamped backup → Restore. |
 | SmartScreen on another PC | The build is unsigned: *More info → Run anyway*. |
 
 ## Roadmap
 
-The next milestone expands the app from button remapping into a full input
-customisation suite with six tabs:
+1.2 added layers, application exceptions, the emergency stop, the mapping
+workflow and full backups. The remaining input-suite work is:
 
-1. **Scroll** — system scroll lines, reverse/smooth scrolling, app-specific overrides.
-2. **Mouse** — Windows pointer speed, acceleration, primary button, double-click speed, sensitivity profiles.
-3. **Buttons** — the mapping engine above plus macros.
-4. **Keyboard** — key remapping, repeat delay/rate, key disabling, per-app rules.
-5. **Exceptions** — allow/block lists per executable, per-app profiles.
-6. **Settings** — schema-driven controls, full config import/export, update info.
+1. **Scroll** (1.3) — invert/swap axes, wheel lines, accelerated scrolling and
+   per-app overrides.
+2. **Macros** (1.3) — step sequences, repeat/toggle, launch/text/media actions.
+3. **Mouse** (1.4) — Windows pointer speed, acceleration, primary button and
+   double-click time, with snapshot/restore.
+4. **Keyboard** (1.4) — key remapping, repeat delay/rate and per-app rules,
+   opt-in because it requires an always-on keyboard hook.
 
 OS-level changes will snapshot and restore original Windows values, with explicit
 warnings and no silent modification.

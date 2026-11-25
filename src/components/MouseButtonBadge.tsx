@@ -25,7 +25,6 @@ export function MouseButtonBadge({
       )}
       title={`${buttonLabel(button)} button`}
     >
-      <MouseGlyph className="absolute -right-1 -top-1 size-5 text-zinc-300/60 dark:text-white/10" />
       {!hideLabel && <span className="relative">{buttonLabel(button)}</span>}
     </span>
   );

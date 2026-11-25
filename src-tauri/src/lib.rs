@@ -83,6 +83,11 @@ pub fn run() {
                     "Global input detection could not start: {error}"
                 )));
             }
+            crate::platform::foreground::start(engine.clone());
+            crate::platform::hotkey::start(
+                handle.clone(),
+                config.settings.panic_hotkey.clone(),
+            );
 
             // Safety net: if the webview never calls `app_ready`, still reveal
             // the window so the app cannot become invisible.
@@ -129,10 +134,31 @@ pub fn run() {
             commands::save_mapping,
             commands::delete_mapping,
             commands::set_mapping_enabled,
+            commands::duplicate_mapping,
+            commands::set_mappings_enabled,
+            commands::save_layer,
+            commands::delete_layer,
+            commands::set_layer_enabled,
+            commands::save_layer_mapping,
+            commands::delete_layer_mapping,
+            commands::set_layer_mapping_enabled,
+            commands::save_exception,
+            commands::delete_exception,
+            commands::set_exception_enabled,
+            commands::list_open_apps,
+            commands::test_action,
+            commands::get_mapping_activity,
+            commands::clear_mapping_activity,
+            commands::emergency_stop,
             commands::import_profile,
             commands::export_profile,
             commands::reset_config,
             commands::reload_config,
+            commands::export_config,
+            commands::import_config,
+            commands::list_backups,
+            commands::create_backup,
+            commands::restore_backup,
             commands::set_capture_mode,
             commands::clear_warnings,
             commands::dismiss_banner,

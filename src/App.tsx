@@ -5,9 +5,12 @@ import { LogoMark } from "./components/Logo";
 import { Button } from "./components/Button";
 import { DashboardPage } from "./pages/Dashboard";
 import { MappingsPage } from "./pages/Mappings";
+import { LayersPage } from "./pages/Layers";
 import { ProfilesPage } from "./pages/Profiles";
+import { ExceptionsPage } from "./pages/Exceptions";
 import { SettingsPage } from "./pages/Settings";
 import { AboutPage } from "./pages/About";
+import { Onboarding } from "./components/Onboarding";
 
 export function App() {
   const { snapshot, loading, fatalError, view } = useApp();
@@ -63,11 +66,14 @@ export function App() {
         <div className="relative mx-auto w-full max-w-[1120px] px-8 py-8 pb-16">
           {view === "dashboard" && <DashboardPage />}
           {view === "mappings" && <MappingsPage />}
+          {view === "layers" && <LayersPage />}
           {view === "profiles" && <ProfilesPage />}
+          {view === "exceptions" && <ExceptionsPage />}
           {view === "settings" && <SettingsPage />}
           {view === "about" && <AboutPage />}
         </div>
       </main>
+      <Onboarding />
     </div>
   );
 }

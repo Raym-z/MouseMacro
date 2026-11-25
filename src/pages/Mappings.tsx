@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   ChevronRight,
+  Copy,
   MousePointerClick,
   Pencil,
   Plus,
+  Search,
   Trash2,
 } from "lucide-react";
 import { useApp } from "../state/AppContext";
@@ -23,7 +25,10 @@ import { api } from "../lib/api";
 import type { Mapping, MouseButton } from "../lib/types";
 import { MOUSE_BUTTONS } from "../lib/types";
 import {
+  actionLabel,
   buttonLabel,
+  formatAge,
+  shadowedMappingIds,
   sortMappings,
   triggerDescription,
 } from "../lib/format";
@@ -37,6 +42,31 @@ export function MappingsPage() {
   const [deleteTarget, setDeleteTarget] = useState<Mapping | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activity, setActivity] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const list = await api.getMappingActivity();
+        if (!cancelled) {
+          const next: Record<string, number> = {};
+          for (const entry of list) next[entry.mappingId] = entry.ageMs;
+          setActivity(next);
+        }
+      } catch {
+        // Runtime activity is optional; editing must keep working without it.
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   if (!snapshot) return null;
   const { config } = snapshot;
@@ -45,7 +75,23 @@ export function MappingsPage() {
     config.profiles[0];
   const mappings = profile?.mappings ?? [];
   const sorted = sortMappings(mappings);
+  const shadowed = shadowedMappingIds(mappings);
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? sorted.filter((mapping) =>
+        [
+          buttonLabel(mapping.button),
+          triggerDescription(mapping),
+          actionLabel(mapping.action),
+          mapping.name ?? "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(needle),
+      )
+    : sorted;
   const enabledCount = mappings.filter((mapping) => mapping.enabled).length;
+  const shadowedCount = mappings.filter((mapping) => shadowed.has(mapping.id)).length;
   const gestureCount = mappings.filter(
     (mapping) =>
       mapping.trigger.type === "withWheel" ||
@@ -77,6 +123,30 @@ export function MappingsPage() {
       enabled ? "Mapping enabled" : "Mapping disabled",
     );
     setBusyId(null);
+  };
+
+  const duplicateMapping = async (mapping: Mapping) => {
+    setBusyId(mapping.id);
+    await runSnapshot(
+      () => api.duplicateMapping(profile.id, mapping.id),
+      "Mapping duplicated",
+    );
+    setBusyId(null);
+  };
+
+  const setAllEnabled = async (enabled: boolean) => {
+    if (mappings.length === 0) return;
+    setBulkBusy(true);
+    await runSnapshot(
+      () =>
+        api.setMappingsEnabled(
+          profile.id,
+          mappings.map((mapping) => mapping.id),
+          enabled,
+        ),
+      enabled ? "All mappings enabled" : "All mappings disabled",
+    );
+    setBulkBusy(false);
   };
 
   const deleteMapping = async () => {
@@ -144,16 +214,50 @@ export function MappingsPage() {
         </Callout>
       )}
 
-      <div className="mb-5 flex flex-wrap items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <Badge tone="neutral">{profile?.name}</Badge>
         <Badge tone={enabledCount > 0 ? "success" : "outline"} dot>
           {enabledCount} enabled
         </Badge>
         <Badge tone="outline">{mappings.length} total</Badge>
         <Badge tone="outline">{gestureCount} gestures</Badge>
+        {shadowedCount > 0 && (
+          <Badge tone="warning" dot>
+            {shadowedCount} shadowed
+          </Badge>
+        )}
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search mappings"
+              className="focus-ring h-8 w-[190px] rounded-lg border border-zinc-200 bg-white pl-8 pr-2 text-[11.5px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={bulkBusy || mappings.length === 0}
+            onClick={() => setAllEnabled(false)}
+          >
+            Disable all
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={bulkBusy || mappings.length === 0}
+            onClick={() => setAllEnabled(true)}
+          >
+            Enable all
+          </Button>
+        </div>
+      </div>
+      <div className="mb-5 flex items-center">
         <button
           onClick={() => setView("settings")}
-          className="focus-ring ml-auto flex items-center gap-1 rounded text-[11.5px] font-medium text-zinc-500 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          className="focus-ring flex items-center gap-1 rounded text-[11.5px] font-medium text-zinc-500 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
         >
           Priority & timing <ArrowRight className="size-3" />
         </button>
@@ -174,8 +278,21 @@ export function MappingsPage() {
         </div>
       ) : (
         <div className="space-y-5">
+          {visible.length === 0 && (
+            <div className="surface rounded-2xl px-6 py-8 text-center">
+              <p className="text-[12.5px] font-medium">
+                No mappings match “{query}”.
+              </p>
+              <button
+                onClick={() => setQuery("")}
+                className="focus-ring mt-2 rounded text-[11.5px] font-medium text-zinc-500 underline-offset-2 hover:underline dark:text-zinc-400"
+              >
+                Clear search
+              </button>
+            </div>
+          )}
           {MOUSE_BUTTONS.map((button) => {
-            const group = sorted.filter((mapping) => mapping.button === button);
+            const group = visible.filter((mapping) => mapping.button === button);
             if (group.length === 0) return null;
             return (
               <section key={button}>
@@ -220,6 +337,16 @@ export function MappingsPage() {
                           {!mapping.enabled && (
                             <Badge tone="outline">Disabled</Badge>
                           )}
+                          {shadowed.has(mapping.id) && (
+                            <span title="An earlier enabled mapping uses the same button and trigger, so this one can never fire.">
+                              <Badge tone="warning">Shadowed</Badge>
+                            </span>
+                          )}
+                          {activity[mapping.id] !== undefined && (
+                            <span className="text-[10.5px] text-zinc-400 dark:text-zinc-500">
+                              fired {formatAge(activity[mapping.id])}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 truncate text-[11.5px] text-secondary">
                           {triggerDescription(mapping)}
@@ -235,6 +362,16 @@ export function MappingsPage() {
                           }
                           label={`Enable mapping ${mapping.id}`}
                         />
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => duplicateMapping(mapping)}
+                          disabled={busyId === mapping.id}
+                          title="Duplicate mapping"
+                          aria-label="Duplicate mapping"
+                        >
+                          <Copy className="size-3.5" />
+                        </Button>
                         <Button
                           size="icon"
                           variant="ghost"

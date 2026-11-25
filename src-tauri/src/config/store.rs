@@ -9,6 +9,17 @@ use super::model::{AppConfig, Profile};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_BACKUPS: usize = 10;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInfo {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    /// Unix seconds, or 0 when the filesystem timestamp is unavailable.
+    pub saved_at: u64,
+}
 
 pub struct Loaded {
     pub config: AppConfig,
@@ -100,7 +111,7 @@ impl ConfigStore {
             .map_err(|error| format!("Could not serialize the configuration: {error}"))?;
 
         if path.exists() {
-            let _ = fs::copy(&path, self.dir.join("config.backup.json"));
+            self.rotate_backup(&path);
         }
 
         {
@@ -115,6 +126,155 @@ impl ConfigStore {
         fs::rename(&temp, &path)
             .map_err(|error| format!("Could not replace the configuration file: {error}"))?;
         Ok(())
+    }
+
+    /// Copies the previous config into a timestamped slot and prunes old ones.
+    /// `config.backup.json` is kept as the most recent copy for manual recovery.
+    fn rotate_backup(&self, path: &Path) {
+        let _ = fs::copy(path, self.dir.join("config.backup.json"));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let backup = self
+            .dir
+            .join(format!("config.backup-{stamp:013}.json"));
+        let _ = fs::copy(path, backup);
+        self.prune_backups();
+    }
+
+    fn prune_backups(&self) {
+        let mut entries: Vec<PathBuf> = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("config.backup-") && name.ends_with(".json")
+                        })
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        for path in entries.into_iter().skip(MAX_BACKUPS) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    pub fn create_backup(&self, config: &AppConfig) -> Result<BackupInfo, String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = self
+            .dir
+            .join(format!("config.backup-{stamp:013}.json"));
+        let text = serde_json::to_string_pretty(config)
+            .map_err(|error| format!("Could not serialize the configuration: {error}"))?;
+        fs::write(&path, text)
+            .map_err(|error| format!("Could not write the backup: {error}"))?;
+        self.prune_backups();
+        self.backup_info(&path)
+    }
+
+    pub fn list_backups(&self) -> Vec<BackupInfo> {
+        let mut backups: Vec<BackupInfo> = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("config.backup-") && name.ends_with(".json")
+                        })
+                })
+                .filter_map(|path| self.backup_info(&path).ok())
+                .collect(),
+            Err(_) => return Vec::new(),
+        };
+        backups.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.name.cmp(&a.name)));
+        backups
+    }
+
+    fn backup_info(&self, path: &Path) -> Result<BackupInfo, String> {
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("Could not read the backup: {error}"))?;
+        let saved_at = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Invalid backup name.".to_string())?
+            .to_string();
+        Ok(BackupInfo {
+            name,
+            path: path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            saved_at,
+        })
+    }
+
+    pub fn read_backup(&self, name: &str) -> Result<AppConfig, String> {
+        let safe = !name.contains(['\\', '/', ':'])
+            && name.starts_with("config.backup-")
+            && name.ends_with(".json");
+        if !safe {
+            return Err("That backup name is not valid.".into());
+        }
+        self.read_config_file(&self.dir.join(name))
+    }
+
+    pub fn write_config(&self, config: &AppConfig, path: &Path) -> Result<(), String> {
+        #[derive(Serialize)]
+        struct Export<'a> {
+            r#format: &'static str,
+            version: u32,
+            config: &'a AppConfig,
+        }
+        let payload = Export {
+            r#format: "mousemacro.config",
+            version: super::model::SCHEMA_VERSION,
+            config,
+        };
+        let text = serde_json::to_string_pretty(&payload)
+            .map_err(|error| format!("Could not serialize the configuration: {error}"))?;
+        fs::write(path, text)
+            .map_err(|error| format!("Could not save the configuration file: {error}"))
+    }
+
+    pub fn read_config(&self, path: &Path) -> Result<AppConfig, String> {
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("Could not open the selected file: {error}"))?;
+        if metadata.len() > MAX_CONFIG_BYTES {
+            return Err("The selected configuration is larger than 4 MB.".into());
+        }
+        let raw = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read the selected file: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("That file is not valid JSON: {error}"))?;
+        let config_value = value.get("config").cloned().unwrap_or(value);
+        serde_json::from_value(config_value)
+            .map_err(|error| format!("That file is not a MouseMacro configuration: {error}"))
+    }
+
+    fn read_config_file(&self, path: &Path) -> Result<AppConfig, String> {
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("Could not read the backup: {error}"))?;
+        if metadata.len() > MAX_CONFIG_BYTES {
+            return Err("The backup is larger than 4 MB.".into());
+        }
+        let raw = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read the backup: {error}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|error| format!("That backup is not valid: {error}"))
     }
 
     fn back_up_corrupt(&self, path: &Path) {
@@ -217,6 +377,47 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().starts_with("config.corrupt-")));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn full_config_export_round_trips() {
+        let dir = temp_dir("config-export");
+        let store = ConfigStore::new(dir.clone()).unwrap();
+        let path = dir.join("all.mousemacro.json");
+        let mut config = AppConfig::default();
+        config.profiles[0].name = "Exported set".into();
+        store.write_config(&config, &path).unwrap();
+
+        let loaded = store.read_config(&path).unwrap();
+        assert_eq!(loaded.profiles[0].name, "Exported set");
+        assert_eq!(loaded.profiles.len(), config.profiles.len());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backups_are_listed_and_restored() {
+        let dir = temp_dir("backups");
+        let store = ConfigStore::new(dir.clone()).unwrap();
+        let info = store.create_backup(&AppConfig::default()).unwrap();
+        assert!(info.name.starts_with("config.backup-"));
+
+        let backups = store.list_backups();
+        assert_eq!(backups.len(), 1);
+        let restored = store.read_backup(&backups[0].name).unwrap();
+        assert_eq!(restored.profiles.len(), 4);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backup_names_cannot_escape_the_folder() {
+        let dir = temp_dir("backup-traversal");
+        let store = ConfigStore::new(dir.clone()).unwrap();
+        assert!(store.read_backup("../config.json").is_err());
+        assert!(store.read_backup("config.json").is_err());
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ChevronRight,
   MousePointerClick,
+  Play,
   ScanLine,
   Sparkles,
   Trash2,
@@ -40,6 +41,8 @@ import {
 interface MappingSheetProps {
   open: boolean;
   profileId: string;
+  /** When set, the mapping belongs to a held-button layer. */
+  layerId?: string;
   mapping: Mapping | null;
   initialButton?: MouseButton;
   onClose: () => void;
@@ -89,6 +92,7 @@ const ACTION_TYPES: Array<{ value: Action["type"]; label: string }> = [
 export function MappingSheet({
   open,
   profileId,
+  layerId,
   mapping,
   initialButton,
   onClose,
@@ -254,7 +258,9 @@ export function MappingSheet({
     setSaving(true);
     setError(null);
     try {
-      const next = await api.saveMapping(profileId, draft);
+      const next = layerId
+        ? await api.saveLayerMapping(profileId, layerId, draft)
+        : await api.saveMapping(profileId, draft);
       applySnapshot(next);
       toast(mapping ? "Mapping updated" : "Mapping added", "success");
       onClose();
@@ -264,6 +270,31 @@ export function MappingSheet({
       toast(message, "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const testAction = async () => {
+    const draft: Mapping = {
+      id: mapping?.id ?? "test",
+      name: name.trim() ? name.trim() : null,
+      button,
+      trigger,
+      action,
+      enabled: true,
+    };
+    const validation = validateMapping(draft);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    try {
+      await api.testAction(action);
+      setError(null);
+      toast("Test action sent", "success");
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setError(message);
+      toast(message, "error");
     }
   };
 
@@ -610,6 +641,16 @@ export function MappingSheet({
           </span>
           <ChevronRight className="size-3 shrink-0" />
           <ActionPreview action={action} />
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<Play />}
+            onClick={testAction}
+            disabled={saving}
+            title="Run this action once. Hold actions are tapped for the test."
+          >
+            Test
+          </Button>
         </span>
       </div>
     </Sheet>

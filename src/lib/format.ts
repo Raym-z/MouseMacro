@@ -239,6 +239,46 @@ export function sortMappings(mappings: Mapping[]): Mapping[] {
   });
 }
 
+export function triggerKey(trigger: Trigger): string {
+  switch (trigger.type) {
+    case "withButton":
+      return `withButton:${trigger.button}`;
+    case "withWheel":
+      return `withWheel:${trigger.direction}`;
+    default:
+      return trigger.type;
+  }
+}
+
+/**
+ * The engine resolves the first enabled mapping for a button + trigger pair.
+ * Every later duplicate can never fire, so the UI marks it instead of silently
+ * letting the user wonder why an edit did nothing.
+ */
+export function shadowedMappingIds(mappings: Mapping[]): Set<string> {
+  const seen = new Set<string>();
+  const shadowed = new Set<string>();
+  for (const mapping of mappings) {
+    if (!mapping.enabled) continue;
+    const key = `${mapping.button}:${triggerKey(mapping.trigger)}`;
+    if (seen.has(key)) {
+      shadowed.add(mapping.id);
+    } else {
+      seen.add(key);
+    }
+  }
+  return shadowed;
+}
+
+export function formatAge(ageMs: number): string {
+  if (ageMs < 1_500) return "just now";
+  const seconds = Math.round(ageMs / 1_000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
 export function countByButton(
   mappings: Mapping[],
 ): Array<{ button: MouseButton; count: number }> {

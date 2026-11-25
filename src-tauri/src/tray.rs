@@ -27,6 +27,7 @@ fn menu_for(app: &AppHandle, config: &AppConfig) -> tauri::Result<Menu<tauri::Wr
         )?;
         profiles.append(&item)?;
     }
+    let panic = MenuItem::with_id(app, "panic", "Stop all input", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let version = MenuItem::with_id(
@@ -42,6 +43,7 @@ fn menu_for(app: &AppHandle, config: &AppConfig) -> tauri::Result<Menu<tauri::Wr
     menu.append(&open)?;
     menu.append(&enabled)?;
     menu.append(&profiles)?;
+    menu.append(&panic)?;
     menu.append(&settings)?;
     menu.append(&separator)?;
     menu.append(&version)?;
@@ -117,6 +119,9 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         "enabled" => {
             let enabled = !state.cfg().settings.enabled;
             report(app, state.set_enabled(enabled).map(|_| ()));
+        }
+        "panic" => {
+            state.engine.panic();
         }
         "exit" => {
             app.exit(0);

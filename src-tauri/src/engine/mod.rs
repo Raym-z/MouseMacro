@@ -17,7 +17,7 @@
 pub mod keys;
 
 use crate::config::model::{
-    Action, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger,
+    Action, Layer, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger,
 };
 use std::collections::HashSet;
 
@@ -49,8 +49,9 @@ pub enum ReplayDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Execute an action instantly. Sustained actions are pressed and released
-    /// immediately when delivered this way.
-    Run(Action),
+    /// immediately when delivered this way. The mapping id lets the host record
+    /// accurate per-mapping activity.
+    Run { action: Action, mapping_id: String },
     /// Press a sustained action and keep it held until the matching token is
     /// released.
     StartHold { token: String, action: Action },
@@ -82,6 +83,9 @@ pub struct EngineConfig {
     pub double_click_ms: u64,
     pub priority: Vec<RuleCategory>,
     pub mappings: Vec<Mapping>,
+    /// Layers of the active profile. An enabled layer applies while its
+    /// activator button is physically held.
+    pub layers: Vec<Layer>,
 }
 
 impl Default for EngineConfig {
@@ -92,6 +96,7 @@ impl Default for EngineConfig {
             double_click_ms: 280,
             priority: RuleCategory::all(),
             mappings: Vec::new(),
+            layers: Vec::new(),
         }
     }
 }
@@ -107,6 +112,10 @@ impl EngineConfig {
             mappings: config
                 .active_profile()
                 .map(|profile| profile.mappings.clone())
+                .unwrap_or_default(),
+            layers: config
+                .active_profile()
+                .map(|profile| profile.layers.clone())
                 .unwrap_or_default(),
         }
     }
@@ -151,12 +160,20 @@ struct ConsumedUntilUp {
     tokens: Vec<String>,
 }
 
+/// A layer is active only while its activator button is physically down.
+#[derive(Debug, Clone)]
+struct ActiveLayer {
+    button: MouseButton,
+    id: String,
+}
+
 pub struct InputEngine {
     config: EngineConfig,
     held: Vec<HeldButton>,
     pending: Option<PendingTap>,
     chord_consumed: Vec<MouseButton>,
     consumed_until_up: Vec<ConsumedUntilUp>,
+    active_layers: Vec<ActiveLayer>,
     seq: u64,
 }
 
@@ -168,6 +185,7 @@ impl InputEngine {
             pending: None,
             chord_consumed: Vec::new(),
             consumed_until_up: Vec::new(),
+            active_layers: Vec::new(),
             seq: 0,
         }
     }
@@ -182,6 +200,7 @@ impl InputEngine {
         self.pending = None;
         self.chord_consumed.clear();
         self.consumed_until_up.clear();
+        self.active_layers.clear();
         self.config = config;
         effects
     }
@@ -193,6 +212,7 @@ impl InputEngine {
         self.pending = None;
         self.chord_consumed.clear();
         self.consumed_until_up.clear();
+        self.active_layers.clear();
         effects
     }
 
@@ -219,6 +239,7 @@ impl InputEngine {
                 self.pending = None;
                 self.chord_consumed.clear();
                 self.consumed_until_up.clear();
+        self.active_layers.clear();
             }
             return Outcome::pass();
         }
@@ -248,6 +269,11 @@ impl InputEngine {
     }
 
     fn on_button_down(&mut self, button: MouseButton, _time: u64, outcome: &mut Outcome) {
+        // A layer becomes available the moment its activator goes down. The
+        // activator's own taps still resolve against the profile, so holding
+        // B5 can change other buttons without losing B5's normal action.
+        self.activate_layer(button);
+
         // Gestures have the highest priority: a held mapped button + this
         // button can form a chord.
         if let Some(held_index) = self.find_chord(button) {
@@ -267,7 +293,7 @@ impl InputEngine {
                     });
                     self.held[held_index].holds.push(token.clone());
                 } else {
-                    self.run_action(&mapping.action, &mut outcome.effects);
+                    self.run_action(&mapping, &mut outcome.effects);
                 }
                 self.held[held_index].chords.push(ActiveChord {
                     button,
@@ -297,12 +323,12 @@ impl InputEngine {
                         });
                         tokens.push(token);
                     } else {
-                        self.run_action(&mapping.action, &mut outcome.effects);
+                        self.run_action(&mapping, &mut outcome.effects);
                     }
                 } else {
                     match pending.fallback {
                         PendingFallback::Action(single) => {
-                            self.run_action(&single.action, &mut outcome.effects);
+                            self.run_action(&single, &mut outcome.effects);
                         }
                         PendingFallback::Replay => {
                             outcome.effects.push(Effect::Replay {
@@ -323,9 +349,9 @@ impl InputEngine {
         }
 
         // A button only needs to be tracked if it participates as the primary
-        // button in at least one enabled mapping. Everything else passes through
-        // with zero latency.
-        if !self.config.mappings.iter().any(|m| m.enabled && m.button == button) {
+        // button in at least one enabled mapping (profile or active layer).
+        // Everything else passes through with zero latency.
+        if !self.has_any_mapping(button) {
             return;
         }
 
@@ -359,6 +385,10 @@ impl InputEngine {
     }
 
     fn on_button_up(&mut self, button: MouseButton, time: u64, outcome: &mut Outcome) {
+        // The layer ends with its activator, before the profile's release-time
+        // rules are resolved, so a tap still works normally.
+        self.deactivate_layer(button);
+
         // Release a chord's secondary button.
         if let Some(pos) = self.chord_consumed.iter().position(|b| *b == button) {
             self.chord_consumed.remove(pos);
@@ -452,7 +482,7 @@ impl InputEngine {
             }
             Some(RuleCategory::Release) => {
                 if let Some(mapping) = release {
-                    self.run_action(&mapping.action, &mut outcome.effects);
+                    self.run_action(&mapping, &mut outcome.effects);
                 }
             }
             Some(RuleCategory::SingleClick) => {
@@ -461,7 +491,7 @@ impl InputEngine {
                         // Already started on button down; releasing the token
                         // above is the whole action.
                     } else {
-                        self.run_action(&mapping.action, &mut outcome.effects);
+                        self.run_action(&mapping, &mut outcome.effects);
                     }
                 }
             }
@@ -491,7 +521,27 @@ impl InputEngine {
                 let held = &mut self.held[index];
                 held.gesture_used = true;
                 Self::release_tokens(held, outcome);
-                self.run_action(&mapping.action, &mut outcome.effects);
+                self.run_action(&mapping, &mut outcome.effects);
+                return;
+            }
+        }
+
+        // Layer activators are not necessarily tracked as held buttons (they
+        // may have no profile mapping), so check them explicitly for wheel
+        // overrides such as "hold B5, scroll up" inside a layer.
+        let activators: Vec<MouseButton> = self
+            .active_layers
+            .iter()
+            .rev()
+            .map(|layer| layer.button)
+            .collect();
+        for button in activators {
+            let mapping = self
+                .find_mapping(button, &Trigger::WithWheel { direction })
+                .cloned();
+            if let Some(mapping) = mapping {
+                outcome.suppress = true;
+                self.run_action(&mapping, &mut outcome.effects);
                 return;
             }
         }
@@ -520,7 +570,7 @@ impl InputEngine {
                     });
                     self.held[index].holds.push(token);
                 } else {
-                    self.run_action(&mapping.action, &mut outcome.effects);
+                    self.run_action(&mapping, &mut outcome.effects);
                 }
             }
         }
@@ -542,7 +592,7 @@ impl InputEngine {
 
     fn apply_fallback(button: MouseButton, fallback: PendingFallback, effects: &mut Vec<Effect>) {
         match fallback {
-            PendingFallback::Action(mapping) => Self::push_run(&mapping.action, effects),
+            PendingFallback::Action(mapping) => Self::push_run(&mapping, effects),
             PendingFallback::Replay => {
                 effects.push(Effect::Replay {
                     button,
@@ -572,7 +622,80 @@ impl InputEngine {
         None
     }
 
+    fn activate_layer(&mut self, button: MouseButton) {
+        if self
+            .active_layers
+            .iter()
+            .any(|active| active.button == button)
+        {
+            return;
+        }
+        let layer_id = self
+            .config
+            .layers
+            .iter()
+            .find(|layer| layer.enabled && layer.activator == button)
+            .map(|layer| layer.id.clone());
+        if let Some(id) = layer_id {
+            self.active_layers.push(ActiveLayer { button, id });
+        }
+    }
+
+    fn deactivate_layer(&mut self, button: MouseButton) {
+        self.active_layers.retain(|active| active.button != button);
+    }
+
+    fn has_any_mapping(&self, button: MouseButton) -> bool {
+        if self
+            .config
+            .mappings
+            .iter()
+            .any(|mapping| mapping.enabled && mapping.button == button)
+        {
+            return true;
+        }
+
+        self.active_layers.iter().any(|active| {
+            if active.button == button {
+                return false;
+            }
+            self.config
+                .layers
+                .iter()
+                .find(|layer| layer.enabled && layer.id == active.id)
+                .is_some_and(|layer| {
+                    layer
+                        .mappings
+                        .iter()
+                        .any(|mapping| mapping.enabled && mapping.button == button)
+                })
+        })
+    }
+
     fn find_mapping(&self, button: MouseButton, trigger: &Trigger) -> Option<&Mapping> {
+        for active in self.active_layers.iter().rev() {
+            // An activator's own tap, long press and chord rules stay in the
+            // profile; only its wheel gesture may be overridden by the layer.
+            if active.button == button && !matches!(trigger, Trigger::WithWheel { .. }) {
+                continue;
+            }
+            let Some(layer) = self
+                .config
+                .layers
+                .iter()
+                .find(|layer| layer.enabled && layer.id == active.id)
+            else {
+                continue;
+            };
+            if let Some(mapping) = layer
+                .mappings
+                .iter()
+                .find(|mapping| mapping.matches(button, trigger))
+            {
+                return Some(mapping);
+            }
+        }
+
         self.config
             .mappings
             .iter()
@@ -583,13 +706,16 @@ impl InputEngine {
         self.find_mapping(button, trigger).is_some()
     }
 
-    fn run_action(&self, action: &Action, effects: &mut Vec<Effect>) {
-        Self::push_run(action, effects);
+    fn run_action(&self, mapping: &Mapping, effects: &mut Vec<Effect>) {
+        Self::push_run(mapping, effects);
     }
 
-    fn push_run(action: &Action, effects: &mut Vec<Effect>) {
-        if !matches!(action, Action::None | Action::Disable) {
-            effects.push(Effect::Run(action.clone()));
+    fn push_run(mapping: &Mapping, effects: &mut Vec<Effect>) {
+        if !matches!(mapping.action, Action::None | Action::Disable) {
+            effects.push(Effect::Run {
+                action: mapping.action.clone(),
+                mapping_id: mapping.id.clone(),
+            });
         }
     }
 
@@ -674,6 +800,25 @@ mod tests {
             double_click_ms: 280,
             priority: RuleCategory::all(),
             mappings,
+            layers: Vec::new(),
+        })
+    }
+
+    fn layer(activator: MouseButton, mappings: Vec<Mapping>) -> Layer {
+        let mut layer = Layer::new("Test layer", activator);
+        layer.id = format!("layer{}", uuid::Uuid::new_v4());
+        layer.mappings = mappings;
+        layer
+    }
+
+    fn engine_with_layers(mappings: Vec<Mapping>, layers: Vec<Layer>) -> InputEngine {
+        InputEngine::new(EngineConfig {
+            enabled: true,
+            long_press_ms: 400,
+            double_click_ms: 280,
+            priority: RuleCategory::all(),
+            mappings,
+            layers,
         })
     }
 
@@ -682,7 +827,7 @@ mod tests {
             .effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::Run(action) => Some(action),
+                Effect::Run { action, .. } => Some(action),
                 _ => None,
             })
             .collect()
@@ -1088,6 +1233,7 @@ mod tests {
                 RuleCategory::Release,
             ],
             mappings: engine.config.mappings.clone(),
+            layers: engine.config.layers.clone(),
         });
         down(&mut engine, MouseButton::X2, 1_000);
         let release = up(&mut engine, MouseButton::X2, 1_100);
@@ -1155,6 +1301,7 @@ mod tests {
                 RuleCategory::SingleClick,
             ],
             mappings: engine.config.mappings.clone(),
+            layers: engine.config.layers.clone(),
         });
         down(&mut engine, MouseButton::X2, 1_000);
         let release = up(&mut engine, MouseButton::X2, 1_100);
@@ -1290,5 +1437,205 @@ mod tests {
         let gesture = wheel(&mut engine, ScrollDirection::Up, 1_050);
         assert!(gesture.suppress);
         assert_eq!(runs(&gesture), vec![&shortcut(&["ctrl", "equal"])]);
+    }
+
+    #[test]
+    fn layer_remaps_another_button_only_while_the_activator_is_held() {
+        let mut engine = engine_with_layers(
+            vec![mapping(
+                MouseButton::Left,
+                Trigger::SingleClick,
+                shortcut(&["ctrl", "z"]),
+            )],
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::Left,
+                    Trigger::SingleClick,
+                    shortcut(&["ctrl", "c"]),
+                )],
+            )],
+        );
+
+        // The activator itself passes through when it has no profile mapping.
+        assert!(!down(&mut engine, MouseButton::X2, 1_000).suppress);
+        assert!(down(&mut engine, MouseButton::Left, 1_050).suppress);
+        let in_layer = up(&mut engine, MouseButton::Left, 1_100);
+        assert_eq!(runs(&in_layer), vec![&shortcut(&["ctrl", "c"])]);
+        assert!(!up(&mut engine, MouseButton::X2, 1_150).suppress);
+
+        down(&mut engine, MouseButton::Left, 1_200);
+        let after = up(&mut engine, MouseButton::Left, 1_250);
+        assert_eq!(runs(&after), vec![&shortcut(&["ctrl", "z"])]);
+    }
+
+    #[test]
+    fn layer_falls_back_to_the_profile_for_unlisted_buttons() {
+        let mut engine = engine_with_layers(
+            vec![
+                mapping(MouseButton::Left, Trigger::SingleClick, shortcut(&["ctrl", "z"])),
+                mapping(MouseButton::Right, Trigger::SingleClick, shortcut(&["ctrl", "s"])),
+            ],
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::Left,
+                    Trigger::SingleClick,
+                    shortcut(&["ctrl", "c"]),
+                )],
+            )],
+        );
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        down(&mut engine, MouseButton::Right, 1_050);
+        let right = up(&mut engine, MouseButton::Right, 1_100);
+        assert_eq!(runs(&right), vec![&shortcut(&["ctrl", "s"])]);
+        up(&mut engine, MouseButton::X2, 1_150);
+    }
+
+    #[test]
+    fn layer_activator_keeps_its_profile_tap() {
+        let mut engine = engine_with_layers(
+            vec![mapping(
+                MouseButton::X2,
+                Trigger::SingleClick,
+                shortcut(&["ctrl", "z"]),
+            )],
+            vec![layer(MouseButton::X2, Vec::new())],
+        );
+
+        assert!(down(&mut engine, MouseButton::X2, 1_000).suppress);
+        let release = up(&mut engine, MouseButton::X2, 1_100);
+        assert_eq!(runs(&release), vec![&shortcut(&["ctrl", "z"])]);
+    }
+
+    #[test]
+    fn disabled_layer_never_applies() {
+        let mut disabled = layer(
+            MouseButton::X2,
+            vec![mapping(
+                MouseButton::Left,
+                Trigger::SingleClick,
+                shortcut(&["ctrl", "c"]),
+            )],
+        );
+        disabled.enabled = false;
+        let mut engine = engine_with_layers(
+            vec![mapping(
+                MouseButton::Left,
+                Trigger::SingleClick,
+                shortcut(&["ctrl", "z"]),
+            )],
+            vec![disabled],
+        );
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        down(&mut engine, MouseButton::Left, 1_050);
+        let release = up(&mut engine, MouseButton::Left, 1_100);
+        assert_eq!(runs(&release), vec![&shortcut(&["ctrl", "z"])]);
+        up(&mut engine, MouseButton::X2, 1_150);
+    }
+
+    #[test]
+    fn layer_sustained_action_is_released_with_the_trigger_button() {
+        let mut engine = engine_with_layers(
+            Vec::new(),
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::Left,
+                    Trigger::SingleClick,
+                    hold_keys(&["ctrl"]),
+                )],
+            )],
+        );
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        let press = down(&mut engine, MouseButton::Left, 1_050);
+        assert!(matches!(press.effects.as_slice(), [Effect::StartHold { .. }]));
+        let release = up(&mut engine, MouseButton::Left, 1_100);
+        assert!(matches!(
+            release.effects.as_slice(),
+            [Effect::ReleaseHold { .. }]
+        ));
+        up(&mut engine, MouseButton::X2, 1_150);
+    }
+
+    #[test]
+    fn layer_can_override_the_activators_wheel_gesture() {
+        let mut engine = engine_with_layers(
+            vec![
+                mapping(MouseButton::X2, Trigger::SingleClick, shortcut(&["ctrl", "z"])),
+                mapping(
+                    MouseButton::X2,
+                    Trigger::WithWheel { direction: ScrollDirection::Up },
+                    shortcut(&["ctrl", "equal"]),
+                ),
+            ],
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::X2,
+                    Trigger::WithWheel { direction: ScrollDirection::Up },
+                    shortcut(&["alt", "up"]),
+                )],
+            )],
+        );
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        let layered = wheel(&mut engine, ScrollDirection::Up, 1_050);
+        assert!(layered.suppress);
+        assert_eq!(runs(&layered), vec![&shortcut(&["alt", "up"])]);
+        let layered_release = up(&mut engine, MouseButton::X2, 1_100);
+        assert!(runs(&layered_release).is_empty(), "gesture cancels the tap");
+
+        // A plain tap after the gesture still uses the profile.
+        down(&mut engine, MouseButton::X2, 1_200);
+        let tap = up(&mut engine, MouseButton::X2, 1_250);
+        assert_eq!(runs(&tap), vec![&shortcut(&["ctrl", "z"])]);
+    }
+
+    #[test]
+    fn layer_wheel_works_even_without_a_profile_mapping() {
+        let mut engine = engine_with_layers(
+            Vec::new(),
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::X2,
+                    Trigger::WithWheel { direction: ScrollDirection::Up },
+                    shortcut(&["alt", "up"]),
+                )],
+            )],
+        );
+
+        assert!(!down(&mut engine, MouseButton::X2, 1_000).suppress);
+        let layered = wheel(&mut engine, ScrollDirection::Up, 1_050);
+        assert!(layered.suppress);
+        assert_eq!(runs(&layered), vec![&shortcut(&["alt", "up"])]);
+        assert!(!up(&mut engine, MouseButton::X2, 1_100).suppress);
+    }
+
+    #[test]
+    fn cancelling_releases_layer_holds_and_deactivates_layers() {
+        let mut engine = engine_with_layers(
+            Vec::new(),
+            vec![layer(
+                MouseButton::X2,
+                vec![mapping(
+                    MouseButton::Left,
+                    Trigger::SingleClick,
+                    hold_keys(&["ctrl"]),
+                )],
+            )],
+        );
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        down(&mut engine, MouseButton::Left, 1_050);
+        let effects = engine.cancel_all();
+        assert!(matches!(effects.as_slice(), [Effect::ReleaseHold { .. }]));
+
+        // The layer is gone, so the same button now passes through.
+        assert!(!down(&mut engine, MouseButton::Left, 1_100).suppress);
     }
 }

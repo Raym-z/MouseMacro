@@ -3,9 +3,11 @@ import {
   ChevronRight,
   Info,
   Layers,
+  Layers3,
   LayoutDashboard,
   MousePointerClick,
   Settings,
+  ShieldAlert,
 } from "lucide-react";
 import { useApp } from "../state/AppContext";
 import { api } from "../lib/api";
@@ -22,7 +24,9 @@ const NAV_ITEMS: Array<{
 }> = [
   { view: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { view: "mappings", label: "Button mappings", icon: MousePointerClick },
+  { view: "layers", label: "Layers", icon: Layers3 },
   { view: "profiles", label: "Profiles", icon: Layers },
+  { view: "exceptions", label: "Exceptions", icon: ShieldAlert },
   { view: "settings", label: "Settings", icon: Settings },
   { view: "about", label: "About", icon: Info },
 ];
@@ -33,14 +37,18 @@ export function Sidebar() {
 
   if (!snapshot) return null;
   const { config, status } = snapshot;
-  const active = config.settings.enabled;
-  const profile = config.profiles.find((p) => p.id === config.activeProfileId);
+  const engineOn = config.settings.enabled && !status.panicActive;
+  const profile =
+    config.profiles.find((p) => p.id === status.effectiveProfileId) ??
+    config.profiles.find((p) => p.id === config.activeProfileId);
+  const autoApp =
+    status.exceptionMode !== "always" ? status.foregroundApp : null;
 
   const toggle = async () => {
     setBusy(true);
     await runSnapshot(
-      () => api.setEnabled(!active),
-      !active ? "Mouse mappings enabled" : "Mouse mappings paused",
+      () => api.setEnabled(!engineOn),
+      !engineOn ? "Mouse mappings enabled" : "Mouse mappings paused",
     );
     setBusy(false);
   };
@@ -92,18 +100,24 @@ export function Sidebar() {
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                active && status.hooksActive
+                engineOn && status.hooksActive
                   ? "animate-pulse-dot bg-emerald-500"
-                  : "bg-zinc-300 dark:bg-zinc-600",
+                  : status.panicActive
+                    ? "bg-rose-500"
+                    : "bg-zinc-300 dark:bg-zinc-600",
               )}
             />
             <span className="text-[11px] font-semibold">
-              {active ? "Engine on" : "Engine off"}
+              {status.panicActive
+                ? "Emergency stop"
+                : engineOn
+                  ? "Engine on"
+                  : "Engine off"}
             </span>
           </div>
           <Switch
             size="sm"
-            checked={active}
+            checked={engineOn}
             disabled={busy}
             onChange={toggle}
             label="Enable mappings"
@@ -111,10 +125,18 @@ export function Sidebar() {
         </div>
         <button
           onClick={() => setView("profiles")}
+          title={
+            autoApp
+              ? `Profile selected automatically for ${autoApp}`
+              : "Active profile"
+          }
           className="focus-ring mt-2 flex w-full items-center gap-1.5 rounded text-left text-[11px] text-zinc-400 transition hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-300"
         >
           <Layers className="size-3 shrink-0" />
-          <span className="truncate">{profile?.name ?? "No profile"}</span>
+          <span className="truncate">
+            {profile?.name ?? "No profile"}
+            {autoApp ? ` · ${autoApp}` : ""}
+          </span>
           <ChevronRight className="ml-auto size-3" />
         </button>
       </div>

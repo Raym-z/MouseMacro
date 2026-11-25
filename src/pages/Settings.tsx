@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   ArrowDown,
   ArrowUp,
   ChevronRight,
+  Download,
   FolderOpen,
   Gauge,
+  History,
   Lock,
   Monitor,
   Moon,
@@ -18,10 +20,13 @@ import {
   SlidersHorizontal,
   Sun,
   Timer,
+  Upload,
   Zap,
 } from "lucide-react";
+import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../state/AppContext";
 import { useToast } from "../components/Toast";
+import { KeySelector } from "../components/KeySelector";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "../components/Button";
 import { Switch } from "../components/Switch";
@@ -35,7 +40,7 @@ import {
   RULE_CATEGORY_HINT,
   RULE_CATEGORY_LABEL,
 } from "../lib/format";
-import type { RuleCategory, Settings } from "../lib/types";
+import type { BackupInfo, RuleCategory, Settings } from "../lib/types";
 import { cn } from "../lib/cn";
 
 const LONG_PRESS_OPTIONS = [250, 300, 350, 400, 450, 500, 600, 700, 800];
@@ -54,6 +59,24 @@ export function SettingsPage() {
   const [resetting, setResetting] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<BackupInfo | null>(null);
+  const [restoring, setRestoring] = useState(false);
+
+  const refreshBackups = async () => {
+    try {
+      setBackups(await api.listBackups());
+    } catch {
+      // Backup listing is informational; a failure should not block Settings.
+    }
+  };
+
+  useEffect(() => {
+    void refreshBackups();
+  }, []);
 
   if (!snapshot) return null;
   const settings = snapshot.config.settings;
@@ -125,6 +148,81 @@ export function SettingsPage() {
       "Configuration reloaded from disk",
     );
     setReloading(false);
+  };
+
+  const exportConfiguration = async () => {
+    try {
+      const path = await saveFile({
+        title: "Export MouseMacro configuration",
+        defaultPath: "mousemacro-config.json",
+        filters: [{ name: "MouseMacro configuration", extensions: ["json"] }],
+      });
+      if (!path) return;
+      await run(
+        () => api.exportConfig(path),
+        "Configuration exported (settings, profiles, layers and exceptions)",
+      );
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    }
+  };
+
+  const pickImport = async () => {
+    try {
+      const path = await open({
+        title: "Import MouseMacro configuration",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "MouseMacro configuration", extensions: ["json"] }],
+      });
+      if (typeof path === "string") setImportPath(path);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    }
+  };
+
+  const importConfiguration = async () => {
+    if (!importPath) return;
+    setImporting(true);
+    const result = await runSnapshot(
+      () => api.importConfig(importPath),
+      "Configuration imported",
+    );
+    setImporting(false);
+    if (result) {
+      setImportPath(null);
+      void refreshBackups();
+    }
+  };
+
+  const createBackup = async () => {
+    setBackupBusy(true);
+    const result = await run(
+      () => api.createBackup(),
+      "Backup created",
+    );
+    setBackupBusy(false);
+    if (result) void refreshBackups();
+  };
+
+  const restoreBackup = async () => {
+    if (!restoreTarget) return;
+    setRestoring(true);
+    const result = await runSnapshot(
+      () => api.restoreBackup(restoreTarget.name),
+      "Backup restored",
+    );
+    setRestoring(false);
+    if (result) {
+      setRestoreTarget(null);
+      void refreshBackups();
+    }
+  };
+
+  const resumeMappings = async () => {
+    setSaving(true);
+    await runSnapshot(() => api.setEnabled(true), "Mappings resumed");
+    setSaving(false);
   };
 
   const restartElevated = async () => {
@@ -435,6 +533,63 @@ export function SettingsPage() {
         </SettingCard>
 
         <SettingCard
+          icon={ShieldAlert}
+          title="Safety"
+          description="An emergency stop you can reach without opening the window."
+        >
+          <SettingRow
+            title="Emergency stop"
+            description="Disables mappings immediately and releases every synthetic key or button MouseMacro is holding."
+            control={
+              status.panicActive ? (
+                <div className="flex items-center gap-2">
+                  <Badge tone="warning" dot>
+                    Stopped
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={saving}
+                    onClick={resumeMappings}
+                  >
+                    Resume
+                  </Button>
+                </div>
+              ) : (
+                <Badge tone="success" dot>
+                  Ready
+                </Badge>
+              )
+            }
+          />
+          <div className="border-b border-zinc-100 px-4 py-3.5 dark:border-white/[0.055]">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-[12.5px] font-medium">Global hotkey</span>
+              <Badge tone="outline">works everywhere</Badge>
+              <span className="ml-auto text-[11px] text-zinc-400 dark:text-zinc-500">
+                {settings.panicHotkey.length === 0 ? "disabled" : "active"}
+              </span>
+            </div>
+            <KeySelector
+              mode="combo"
+              keys={settings.panicHotkey}
+              onChange={(keys) => save({ panicHotkey: keys })}
+            />
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              Default is Ctrl + Alt + Shift + F12. Clear the picker to disable
+              it. The tray menu also has <strong>Stop all input</strong>. Pressing
+              the hotkey never changes your saved settings; use Resume or the
+              tray toggle to start again.
+            </p>
+            {status.hotkeyWarning && (
+              <Callout tone="danger" className="mt-2">
+                {status.hotkeyWarning}
+              </Callout>
+            )}
+          </div>
+        </SettingCard>
+
+        <SettingCard
           icon={Activity}
           title="Input diagnostics"
           description="Verify what the input hook really receives. Use this when a mapping does not fire."
@@ -453,6 +608,94 @@ export function SettingsPage() {
           />
           <div className="px-4 pb-4 pt-3">
             <InputDiagnostics />
+          </div>
+        </SettingCard>
+
+        <SettingCard
+          icon={History}
+          title="Backup and restore"
+          description="One file contains settings, profiles, layers and application rules."
+        >
+          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-4 py-3.5 dark:border-white/[0.055]">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Download />}
+              onClick={exportConfiguration}
+            >
+              Export everything
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Upload />}
+              onClick={pickImport}
+            >
+              Import…
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<RefreshCw />}
+              loading={backupBusy}
+              onClick={createBackup}
+              className="ml-auto"
+            >
+              Back up now
+            </Button>
+          </div>
+
+          <div className="px-4 py-3.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-medium">Automatic backups</span>
+              <Badge tone="outline">last 10</Badge>
+              <span className="ml-auto text-[10.5px] text-zinc-400 dark:text-zinc-500">
+                written before every save
+              </span>
+              <button
+                onClick={() => void refreshBackups()}
+                title="Refresh backup list"
+                aria-label="Refresh backup list"
+                className="focus-ring grid size-6 place-items-center rounded text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200"
+              >
+                <RefreshCw className="size-3" />
+              </button>
+            </div>
+            {backups.length === 0 ? (
+              <p className="mt-2 rounded-lg border border-dashed border-zinc-200 px-3 py-2 text-[11.5px] text-zinc-400 dark:border-white/[0.08] dark:text-zinc-500">
+                No backups yet. One is created the next time the configuration
+                changes.
+              </p>
+            ) : (
+              <div className="mt-2 space-y-1">
+                {backups.map((backup) => (
+                  <div
+                    key={backup.name}
+                    className="flex items-center gap-2 rounded-lg border border-zinc-200/80 bg-white px-2.5 py-1.5 text-[11.5px] dark:border-white/[0.06] dark:bg-white/[0.025]"
+                  >
+                    <History className="size-3 shrink-0 text-zinc-400" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {formatBackupTime(backup)}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-zinc-400">
+                      {(backup.size / 1024).toFixed(1)} KB
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setRestoreTarget(backup)}
+                    >
+                      Restore
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              Restoring replaces the current profiles and settings. A backup of
+              the current state is written first, so a restore is itself
+              reversible.
+            </p>
           </div>
         </SettingCard>
 
@@ -554,6 +797,39 @@ export function SettingsPage() {
       </Callout>
 
       <ConfirmDialog
+        open={importPath !== null}
+        onClose={() => setImportPath(null)}
+        onConfirm={importConfiguration}
+        loading={importing}
+        title="Replace the current configuration?"
+        description={importPath ?? undefined}
+        confirmLabel="Import and replace"
+      >
+        <Callout tone="danger">
+          Settings, profiles, layers and application rules will be replaced.
+          The current state is backed up first, and an imported file cannot
+          change Windows startup integration.
+        </Callout>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={restoreTarget !== null}
+        onClose={() => setRestoreTarget(null)}
+        onConfirm={restoreBackup}
+        loading={restoring}
+        title="Restore this backup?"
+        description={
+          restoreTarget ? formatBackupTime(restoreTarget) : undefined
+        }
+        confirmLabel="Restore backup"
+      >
+        <Callout tone="warning">
+          The current configuration is saved as a backup before the restore, so
+          you can undo this.
+        </Callout>
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={resetOpen}
         onClose={() => setResetOpen(false)}
         onConfirm={resetConfiguration}
@@ -596,6 +872,14 @@ function SettingCard({
       {children}
     </section>
   );
+}
+
+function formatBackupTime(backup: BackupInfo): string {
+  if (!backup.savedAt) return backup.name;
+  return new Date(backup.savedAt * 1000).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
 }
 
 function SettingRow({

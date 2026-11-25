@@ -4,6 +4,47 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.2.0] — 2026-11-25
+
+Mappings become context-aware, repeatable and safer to leave running.
+
+### Added
+
+- **Application exceptions** — per-executable rules that disable mappings or
+  switch to another profile while that app is in the foreground. The foreground
+  watcher runs four times per second, and releasing a hold on app switch
+  prevents stuck keys.
+- **Layers** — hold a button to activate a second mapping set for the other
+  buttons and wheel. Unlisted buttons still fall back to the profile, and the
+  activator keeps its own tap/long-press behaviour.
+- **Emergency stop** — global hotkey (default `Ctrl + Alt + Shift + F12`) and a
+  tray item release every synthetic key/button and pause mappings without
+  changing saved settings. Resume from the tray or the Safety card.
+- **Mapping workflow** — search, duplicate, enable/disable all, shadow warnings
+  for duplicate button+trigger pairs, per-mapping last-fired times, and a Test
+  button that runs an action once from the editor.
+- **Backup and restore** — export/import all settings, profiles, layers and
+  exceptions as one versioned JSON file. Ten rotating timestamped backups are
+  kept, with one-click restore that backs up the current state first.
+- **First-run setup** — guided three-step wizard: overview, button detection,
+  then profile and startup choices.
+- **Application picker** — add a rule for any visible window, or type an
+  executable name.
+
+### Changed
+
+- Configuration schema is now **v2**. Existing files migrate automatically with
+  a backup; the first-run wizard is suppressed for existing installs.
+- The tray can stop all input, and the sidebar shows the effective profile and
+  the app that selected it.
+- Imported full configurations never change Windows startup integration; the
+  registry stays the source of truth.
+
+### Tests
+
+- 77 Rust tests, including layer resolution/fallback, exception precedence,
+  panic precedence, backup restoration and hotkey combo parsing.
+
 ## [1.1.0] — 2026-11-25
 
 Adds in-app input diagnostics, support for vendor-software input, and reloading

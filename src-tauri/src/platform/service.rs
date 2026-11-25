@@ -4,11 +4,12 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
 use crate::config::model::{
-    Action, AppConfig, MouseButton, ScrollDirection,
+    Action, AppConfig, ExceptionMode, MouseButton, ScrollDirection,
 };
 use crate::engine::{keys, Effect, EngineConfig, InputEngine, InputEvent};
 use crate::platform::simulate;
@@ -150,11 +151,31 @@ struct Inner {
     engine: InputEngine,
 }
 
+/// Per-application state that is not persisted. `panic` is the emergency stop;
+/// the exception fields are resolved from the current foreground executable.
+#[derive(Debug, Clone, Default)]
+struct RuntimeState {
+    foreground: Option<String>,
+    exception_mode: ExceptionMode,
+    profile_override: Option<String>,
+    panic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MappingActivity {
+    pub mapping_id: String,
+    pub age_ms: u64,
+}
+
 pub struct EngineService {
     inner: Mutex<Inner>,
     cv: Condvar,
     executor: Executor,
     app: AppHandle,
+    config: Mutex<AppConfig>,
+    runtime: Mutex<RuntimeState>,
+    activity: Mutex<HashMap<String, u64>>,
     capture: AtomicU8,
     accept_external_injection: AtomicBool,
     hooks_active: AtomicBool,
@@ -170,6 +191,9 @@ impl EngineService {
             cv: Condvar::new(),
             executor: Executor::default(),
             app,
+            config: Mutex::new(config.clone()),
+            runtime: Mutex::new(RuntimeState::default()),
+            activity: Mutex::new(HashMap::new()),
             capture: AtomicU8::new(CaptureMode::None as u8),
             accept_external_injection: AtomicBool::new(
                 config.settings.process_injected_input,
@@ -220,13 +244,189 @@ impl EngineService {
             config.settings.process_injected_input,
             Ordering::SeqCst,
         );
+        let effective = {
+            let mut stored = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            *stored = config.clone();
+            let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            Self::resolve_runtime(config, &mut runtime);
+            Self::compute_effective(config, &runtime)
+        };
+        self.apply_effective(effective, false);
+    }
+
+    /// Recomputes the engine's effective configuration from the active
+    /// exceptions and the emergency stop.
+    fn compute_effective(config: &AppConfig, runtime: &RuntimeState) -> EngineConfig {
+        let mut effective = EngineConfig::from_app(config);
+        if runtime.panic || !effective.enabled {
+            effective.enabled = false;
+            return effective;
+        }
+
+        match runtime.exception_mode {
+            ExceptionMode::Disable => effective.enabled = false,
+            ExceptionMode::Profile => {
+                if let Some(id) = runtime.profile_override.as_deref() {
+                    if let Some(profile) = config.profiles.iter().find(|p| p.id == id) {
+                        effective.mappings = profile.mappings.clone();
+                        effective.layers = profile.layers.clone();
+                    }
+                }
+            }
+            ExceptionMode::Always => {}
+        }
+        effective
+    }
+
+    fn resolve_runtime(config: &AppConfig, runtime: &mut RuntimeState) {
+        runtime.exception_mode = ExceptionMode::Always;
+        runtime.profile_override = None;
+        let Some(process) = runtime.foreground.as_deref() else {
+            return;
+        };
+        if let Some(rule) = config.exceptions.iter().find(|rule| rule.matches(process)) {
+            runtime.exception_mode = rule.mode;
+            if rule.mode == ExceptionMode::Profile {
+                runtime.profile_override = rule.profile_id.clone();
+            }
+        }
+    }
+
+    fn apply_effective(&self, effective: EngineConfig, notify: bool) {
         let effects = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.engine.reconfigure(EngineConfig::from_app(config))
+            inner.engine.reconfigure(effective)
         };
         self.cv.notify_all();
         self.execute(effects);
+        if notify {
+            let _ = self.app.emit("state:changed", ());
+        }
     }
+
+    /// Called by the foreground watcher whenever the user switches apps.
+    pub fn set_foreground(&self, process: Option<String>) {
+        let normalized = process
+            .as_deref()
+            .and_then(crate::config::model::normalize_process_name);
+
+        let effective = {
+            let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if runtime.foreground == normalized {
+                return;
+            }
+            runtime.foreground = normalized;
+            Self::resolve_runtime(&config, &mut runtime);
+            Self::compute_effective(&config, &runtime)
+        };
+        self.apply_effective(effective, true);
+    }
+
+    pub fn foreground_process(&self) -> Option<String> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .foreground
+            .clone()
+    }
+
+    pub fn exception_mode(&self) -> ExceptionMode {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .exception_mode
+    }
+
+    /// The profile the engine is actually using, including app overrides.
+    pub fn effective_profile_id(&self) -> String {
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        runtime
+            .profile_override
+            .clone()
+            .unwrap_or(config.active_profile_id)
+    }
+
+    /// Emergency stop: disable mappings and release every synthetic key and
+    /// button immediately. The persisted "enabled" setting is untouched, so
+    /// re-enabling from the tray resumes normal behaviour.
+    pub fn panic(&self) {
+        let effective = {
+            let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            runtime.panic = true;
+            Self::compute_effective(&config, &runtime)
+        };
+        self.apply_effective(effective, true);
+        self.executor.release_all();
+    }
+
+    pub fn clear_panic(&self) {
+        let effective = {
+            let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if !runtime.panic {
+                return;
+            }
+            runtime.panic = false;
+            Self::compute_effective(&config, &runtime)
+        };
+        self.apply_effective(effective, true);
+    }
+
+    pub fn panic_active(&self) -> bool {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .panic
+    }
+
+    /// Runs an action once for the editor's Test button.
+    pub fn test_action(&self, action: &Action) {
+        self.executor.run(action);
+    }
+
+    fn record_fired(&self, mapping_id: &str) {
+        let mut activity = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        activity.insert(mapping_id.to_string(), now_ms());
+        if activity.len() > 500 {
+            let oldest = activity
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                activity.remove(&id);
+            }
+        }
+    }
+
+    pub fn activity_snapshot(&self) -> Vec<MappingActivity> {
+        let now = now_ms();
+        let activity = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries: Vec<MappingActivity> = activity
+            .iter()
+            .map(|(mapping_id, at)| MappingActivity {
+                mapping_id: mapping_id.clone(),
+                age_ms: now.saturating_sub(*at),
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.age_ms);
+        entries
+    }
+
+    pub fn clear_activity(&self) {
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+
 
     /// Whether input synthesized by *other* tools (mouse utilities, touchpad
     /// drivers, remote desktop) should be processed. Our own injections are
@@ -399,8 +599,18 @@ impl EngineService {
     fn execute(&self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Run(action) => self.executor.run(&action),
+                Effect::Run {
+                    action,
+                    mapping_id,
+                } => {
+                    self.record_fired(&mapping_id);
+                    self.executor.run(&action)
+                }
                 Effect::StartHold { token, action } => {
+                    // Tokens are `kind:mapping-id:sequence`.
+                    if let Some(mapping_id) = token.split(':').nth(1) {
+                        self.record_fired(mapping_id);
+                    }
                     self.executor.start_hold(&token, &action)
                 }
                 Effect::ReleaseHold { token } => self.executor.release(&token),
@@ -443,5 +653,122 @@ impl EngineService {
     pub fn clear_errors(&self) {
         self.executor.clear_error();
         self.set_hook_warning(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::{
+        Action, AppConfig, ExceptionMode, ExceptionRule, Layer, Mapping, MouseButton, Trigger,
+    };
+
+    fn config_with_alternative_profile() -> (AppConfig, String) {
+        let mut config = AppConfig::default();
+        config.settings.enabled = true;
+        let mut alternative = crate::config::model::Profile::new("Alternative");
+        alternative.mappings = vec![Mapping::new(
+            MouseButton::X1,
+            Trigger::SingleClick,
+            Action::Shortcut {
+                keys: vec!["ctrl".into(), "q".into()],
+            },
+        )];
+        let id = alternative.id.clone();
+        config.profiles.push(alternative);
+        (config, id)
+    }
+
+    #[test]
+    fn disable_exception_turns_the_engine_off() {
+        let config = AppConfig::default();
+        let runtime = RuntimeState {
+            exception_mode: ExceptionMode::Disable,
+            ..RuntimeState::default()
+        };
+        let effective = EngineService::compute_effective(&config, &runtime);
+        assert!(!effective.enabled);
+    }
+
+    #[test]
+    fn profile_exception_swaps_mappings_and_layers() {
+        let (config, profile_id) = config_with_alternative_profile();
+        let mut layer = Layer::new("Alt layer", MouseButton::X2);
+        layer.mappings.push(Mapping::new(
+            MouseButton::Left,
+            Trigger::SingleClick,
+            Action::Shortcut {
+                keys: vec!["ctrl".into(), "w".into()],
+            },
+        ));
+        let mut config = config;
+        config
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .unwrap()
+            .layers
+            .push(layer);
+
+        let runtime = RuntimeState {
+            exception_mode: ExceptionMode::Profile,
+            profile_override: Some(profile_id),
+            ..RuntimeState::default()
+        };
+        let effective = EngineService::compute_effective(&config, &runtime);
+        assert!(effective.enabled);
+        assert_eq!(effective.mappings.len(), 1);
+        assert_eq!(effective.layers.len(), 1);
+    }
+
+    #[test]
+    fn panic_disables_the_engine_even_without_an_exception() {
+        let config = AppConfig::default();
+        let runtime = RuntimeState {
+            panic: true,
+            ..RuntimeState::default()
+        };
+        assert!(!EngineService::compute_effective(&config, &runtime).enabled);
+    }
+
+    #[test]
+    fn the_global_switch_wins_over_a_profile_exception() {
+        let (mut config, profile_id) = config_with_alternative_profile();
+        config.settings.enabled = false;
+        let runtime = RuntimeState {
+            exception_mode: ExceptionMode::Profile,
+            profile_override: Some(profile_id),
+            ..RuntimeState::default()
+        };
+        assert!(!EngineService::compute_effective(&config, &runtime).enabled);
+    }
+
+    #[test]
+    fn the_first_matching_rule_resolves_the_runtime() {
+        let mut config = AppConfig::default();
+        config.exceptions = vec![
+            ExceptionRule::new("chrome.exe", ExceptionMode::Disable),
+            ExceptionRule::new("chrome.exe", ExceptionMode::Profile),
+        ];
+        let mut runtime = RuntimeState {
+            foreground: Some("chrome.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Disable);
+    }
+
+    #[test]
+    fn leaving_a_rule_clears_the_override() {
+        let (config, profile_id) = config_with_alternative_profile();
+        let mut runtime = RuntimeState {
+            exception_mode: ExceptionMode::Profile,
+            profile_override: Some(profile_id),
+            foreground: Some("not-listed.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Always);
+        assert!(runtime.profile_override.is_none());
     }
 }

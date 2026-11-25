@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
+
+/// Default emergency stop. `F12` is reachable on every keyboard and unlikely to
+/// collide with application shortcuts when combined with three modifiers.
+pub const DEFAULT_PANIC_HOTKEY: [&str; 4] = ["ctrl", "alt", "shift", "f12"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,6 +116,107 @@ impl Mapping {
     }
 }
 
+/// A set of mappings that replaces the profile's mappings while
+/// [`Layer::activator`] is held. Mappings that the layer does not define fall
+/// back to the profile, so a layer can change just one or two buttons.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Layer {
+    pub id: String,
+    pub name: String,
+    pub activator: MouseButton,
+    pub enabled: bool,
+    #[serde(default)]
+    pub mappings: Vec<Mapping>,
+}
+
+impl Layer {
+    #[allow(dead_code)]
+    pub fn new(name: impl Into<String>, activator: MouseButton) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.into(),
+            activator,
+            enabled: true,
+            mappings: Vec::new(),
+        }
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExceptionMode {
+    /// Let the profile's mappings apply normally. This is the implicit state
+    /// when no rule exists; an explicit rule is only needed to override a
+    /// broader rule, so the UI usually removes the rule instead.
+    #[default]
+    Always,
+    /// Pass physical input through untouched in this application.
+    Disable,
+    /// Use another profile while this application is in the foreground.
+    Profile,
+}
+
+/// A per-executable behaviour rule. `process` is stored as a lowercase file
+/// name (`photoshop.exe`) so hand-edited paths still normalise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionRule {
+    pub id: String,
+    pub process: String,
+    pub mode: ExceptionMode,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl ExceptionRule {
+    #[allow(dead_code)]
+    pub fn new(process: impl Into<String>, mode: ExceptionMode) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            process: process.into(),
+            mode,
+            profile_id: None,
+            enabled: true,
+        }
+    }
+
+    pub fn matches(&self, process: &str) -> bool {
+        self.enabled && self.process.eq_ignore_ascii_case(process)
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Normalises a user-supplied executable name: lowercase basename, `.exe`
+/// suffix, no path. Returns `None` when nothing usable remains.
+pub fn normalize_process_name(raw: &str) -> Option<String> {
+    let base = raw
+        .trim()
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if base.is_empty() {
+        return None;
+    }
+    let with_extension = if base.ends_with(".exe") {
+        base
+    } else if base.contains('.') {
+        base
+    } else {
+        format!("{base}.exe")
+    };
+    let trimmed: String = with_extension.chars().take(120).collect();
+    Some(trimmed)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuleCategory {
@@ -154,6 +259,19 @@ pub struct Settings {
     pub double_click_ms: u64,
     pub process_injected_input: bool,
     pub rule_priority: Vec<RuleCategory>,
+    /// Global emergency stop. An empty list disables the hotkey.
+    #[serde(default = "default_panic_hotkey")]
+    pub panic_hotkey: Vec<String>,
+    /// False on a fresh install so the app can offer guided setup.
+    #[serde(default)]
+    pub onboarded: bool,
+}
+
+fn default_panic_hotkey() -> Vec<String> {
+    DEFAULT_PANIC_HOTKEY
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect()
 }
 
 impl Default for Settings {
@@ -168,6 +286,8 @@ impl Default for Settings {
             double_click_ms: 280,
             process_injected_input: false,
             rule_priority: RuleCategory::all(),
+            panic_hotkey: default_panic_hotkey(),
+            onboarded: false,
         }
     }
 }
@@ -176,6 +296,19 @@ impl Settings {
     pub fn sanitize(&mut self) {
         self.long_press_ms = self.long_press_ms.clamp(100, 2_000);
         self.double_click_ms = self.double_click_ms.clamp(120, 1_000);
+
+        self.panic_hotkey = self
+            .panic_hotkey
+            .iter()
+            .map(|key| key.trim().to_lowercase())
+            .filter(|key| !key.is_empty())
+            .fold(Vec::new(), |mut keys, key| {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+                keys
+            });
+        self.panic_hotkey.truncate(5);
 
         let mut seen = Vec::new();
         self.rule_priority.retain(|category| {
@@ -203,6 +336,9 @@ pub struct Profile {
     #[serde(default)]
     pub description: String,
     pub mappings: Vec<Mapping>,
+    /// Held-button layers, evaluated before `mappings` while active.
+    #[serde(default)]
+    pub layers: Vec<Layer>,
 }
 
 impl Profile {
@@ -212,6 +348,7 @@ impl Profile {
             name: name.into(),
             description: String::new(),
             mappings: Vec::new(),
+            layers: Vec::new(),
         }
     }
 }
@@ -225,6 +362,9 @@ pub struct AppConfig {
     pub settings: Settings,
     pub profiles: Vec<Profile>,
     pub active_profile_id: String,
+    /// Per-application overrides, matched against the foreground executable.
+    #[serde(default)]
+    pub exceptions: Vec<ExceptionRule>,
 }
 
 fn current_schema() -> u32 {
@@ -303,6 +443,7 @@ impl Default for AppConfig {
             settings: Settings::default(),
             profiles,
             active_profile_id,
+            exceptions: Vec::new(),
         }
     }
 }
@@ -323,6 +464,7 @@ impl AppConfig {
     /// Repairs configs loaded from disk or imported from elsewhere. Returns human-readable notes.
     pub fn sanitize(&mut self) -> Vec<String> {
         let mut notes = Vec::new();
+        let migrating = self.schema_version < SCHEMA_VERSION;
         self.settings.sanitize();
 
         if self.profiles.is_empty() {
@@ -347,48 +489,43 @@ impl AppConfig {
             }
             profile_ids.push(profile.id.clone());
 
-            let mut mapping_ids = Vec::new();
-            let before = profile.mappings.len();
-            profile.mappings.retain_mut(|mapping| {
-                mapping.name = mapping
-                    .name
-                    .as_ref()
-                    .map(|n| n.trim().chars().take(60).collect::<String>())
-                    .filter(|n| !n.is_empty());
-                if mapping.id.trim().is_empty() || mapping_ids.contains(&mapping.id) {
-                    mapping.id = Uuid::new_v4().to_string();
-                }
-                mapping_ids.push(mapping.id.clone());
+            let owner = profile.name.clone();
+            sanitize_mappings(&mut profile.mappings, &owner, "profile", &mut notes);
 
-                match &mut mapping.action {
-                    Action::Shortcut { keys } | Action::HoldKeys { keys } => {
-                        keys.retain(|key| !key.trim().is_empty());
-                        for key in keys.iter_mut() {
-                            *key = key.trim().to_lowercase();
-                        }
-                        keys.dedup();
-                        keys.truncate(8);
-                        !keys.is_empty()
-                    }
-                    Action::Key { key } => {
-                        *key = key.trim().to_lowercase();
-                        !key.is_empty()
-                    }
-                    Action::Scroll { amount, .. } => {
-                        *amount = (*amount).clamp(1, 50);
-                        true
-                    }
-                    _ => true,
+            let mut layer_ids = Vec::new();
+            let mut activators = Vec::new();
+            let before_layers = profile.layers.len();
+            profile.layers.retain_mut(|layer| {
+                let name = layer.name.trim();
+                layer.name = if name.is_empty() {
+                    "Layer".into()
+                } else {
+                    name.chars().take(60).collect()
+                };
+                if layer.id.trim().is_empty() || layer_ids.contains(&layer.id) {
+                    layer.id = Uuid::new_v4().to_string();
                 }
+                layer_ids.push(layer.id.clone());
+
+                // Two layers cannot share an activator: the first one wins, so
+                // keep the list unambiguous instead of silently ignoring one.
+                if activators.contains(&layer.activator) {
+                    return false;
+                }
+                activators.push(layer.activator);
+
+                let owner = layer.name.clone();
+                sanitize_mappings(&mut layer.mappings, &owner, "layer", &mut notes);
+                true
             });
-            if profile.mappings.len() != before {
+            if profile.layers.len() != before_layers {
                 notes.push(format!(
-                    "Removed {} incomplete mapping(s) from “{}”.",
-                    before - profile.mappings.len(),
+                    "Removed {} layer(s) that shared a button in “{}”.",
+                    before_layers - profile.layers.len(),
                     profile.name
                 ));
             }
-            profile.mappings.truncate(500);
+            profile.layers.truncate(20);
         }
 
         if !self.profiles.iter().any(|p| p.id == self.active_profile_id) {
@@ -396,9 +533,100 @@ impl AppConfig {
             notes.push("Selected the first profile as active.".into());
         }
 
+        let profile_ids: Vec<String> = self.profiles.iter().map(|p| p.id.clone()).collect();
+        let mut processes = Vec::new();
+        let before_exceptions = self.exceptions.len();
+        self.exceptions.retain_mut(|rule| {
+            let Some(process) = normalize_process_name(&rule.process) else {
+                return false;
+            };
+            rule.process = process;
+            if processes.contains(&rule.process) {
+                return false;
+            }
+            processes.push(rule.process.clone());
+
+            if rule
+                .profile_id
+                .as_deref()
+                .is_some_and(|id| !profile_ids.iter().any(|known| known == id))
+            {
+                rule.profile_id = None;
+            }
+            if rule.mode == ExceptionMode::Profile && rule.profile_id.is_none() {
+                rule.mode = ExceptionMode::Disable;
+                notes.push(format!(
+                    "“{}” had no profile, so it now passes input through.",
+                    rule.process
+                ));
+            }
+            true
+        });
+        if self.exceptions.len() != before_exceptions {
+            notes.push(format!(
+                "Removed {} duplicate or invalid application rule(s).",
+                before_exceptions - self.exceptions.len()
+            ));
+        }
+        self.exceptions.truncate(100);
+
+        // Existing installs should not see the first-run wizard after upgrading.
+        if migrating {
+            self.settings.onboarded = true;
+        }
+
         self.schema_version = SCHEMA_VERSION;
         notes
     }
+}
+
+fn sanitize_mappings(
+    mappings: &mut Vec<Mapping>,
+    owner: &str,
+    kind: &str,
+    notes: &mut Vec<String>,
+) {
+    let mut mapping_ids = Vec::new();
+    let before = mappings.len();
+    mappings.retain_mut(|mapping| {
+        mapping.name = mapping
+            .name
+            .as_ref()
+            .map(|n| n.trim().chars().take(60).collect::<String>())
+            .filter(|n| !n.is_empty());
+        if mapping.id.trim().is_empty() || mapping_ids.contains(&mapping.id) {
+            mapping.id = Uuid::new_v4().to_string();
+        }
+        mapping_ids.push(mapping.id.clone());
+
+        match &mut mapping.action {
+            Action::Shortcut { keys } | Action::HoldKeys { keys } => {
+                keys.retain(|key| !key.trim().is_empty());
+                for key in keys.iter_mut() {
+                    *key = key.trim().to_lowercase();
+                }
+                keys.dedup();
+                keys.truncate(8);
+                !keys.is_empty()
+            }
+            Action::Key { key } => {
+                *key = key.trim().to_lowercase();
+                !key.is_empty()
+            }
+            Action::Scroll { amount, .. } => {
+                *amount = (*amount).clamp(1, 50);
+                true
+            }
+            _ => true,
+        }
+    });
+    if mappings.len() != before {
+        notes.push(format!(
+            "Removed {} incomplete mapping(s) from {kind} “{owner}”.",
+            before - mappings.len()
+        ));
+    }
+    mappings.truncate(500);
 }
 
 #[cfg(test)]
@@ -427,6 +655,7 @@ mod tests {
             },
             profiles: vec![],
             active_profile_id: "missing".into(),
+            exceptions: vec![],
         };
         let notes = config.sanitize();
         assert!(!notes.is_empty());
@@ -435,6 +664,90 @@ mod tests {
         assert_eq!(config.settings.long_press_ms, 100);
         assert_eq!(config.settings.double_click_ms, 1_000);
         assert_eq!(config.settings.rule_priority.len(), 5);
+    }
+
+    #[test]
+    fn migrating_an_old_config_marks_it_onboarded() {
+        let mut config = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
+        config.settings.onboarded = false;
+        let notes = config.sanitize();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert!(config.settings.onboarded);
+    }
+
+    #[test]
+    fn exceptions_are_normalised_and_deduplicated() {
+        let mut config = AppConfig::default();
+        let profile_id = config.profiles[1].id.clone();
+        config.exceptions = vec![
+            ExceptionRule::new(r"C:\Program Files\Google\Chrome\chrome.exe", ExceptionMode::Disable),
+            ExceptionRule::new("CHROME", ExceptionMode::Profile),
+            ExceptionRule::new("photoshop", ExceptionMode::Profile),
+            ExceptionRule::new("", ExceptionMode::Disable),
+        ];
+        config.exceptions[2].profile_id = Some(profile_id.clone());
+        let notes = config.sanitize();
+        assert_eq!(config.exceptions.len(), 2, "{notes:?}");
+        assert_eq!(config.exceptions[0].process, "chrome.exe");
+        assert_eq!(config.exceptions[1].process, "photoshop.exe");
+        assert_eq!(config.exceptions[1].profile_id.as_deref(), Some(profile_id.as_str()));
+    }
+
+    #[test]
+    fn exception_with_missing_profile_falls_back_to_disable() {
+        let mut config = AppConfig::default();
+        let mut rule = ExceptionRule::new("game.exe", ExceptionMode::Profile);
+        rule.profile_id = Some("missing".into());
+        config.exceptions.push(rule);
+        config.sanitize();
+        assert_eq!(config.exceptions[0].mode, ExceptionMode::Disable);
+        assert!(config.exceptions[0].profile_id.is_none());
+    }
+
+    #[test]
+    fn duplicate_layer_activators_are_removed() {
+        let mut config = AppConfig::default();
+        let profile = config.active_profile_mut().unwrap();
+        let mut first = Layer::new("Shift", MouseButton::X2);
+        first.mappings.push(Mapping::new(
+            MouseButton::Left,
+            Trigger::SingleClick,
+            Action::Shortcut {
+                keys: vec!["ctrl".into(), "c".into()],
+            },
+        ));
+        let second = Layer::new("Also shift", MouseButton::X2);
+        profile.layers = vec![first, second];
+        config.sanitize();
+        assert_eq!(config.active_profile().unwrap().layers.len(), 1);
+        assert_eq!(config.active_profile().unwrap().layers[0].name, "Shift");
+    }
+
+    #[test]
+    fn process_names_become_lowercase_executables() {
+        assert_eq!(
+            normalize_process_name(r"C:\Program Files\Google\Chrome\Chrome.EXE").as_deref(),
+            Some("chrome.exe")
+        );
+        assert_eq!(
+            normalize_process_name("Photoshop").as_deref(),
+            Some("photoshop.exe")
+        );
+        assert_eq!(normalize_process_name("   "), None);
+    }
+
+    #[test]
+    fn panic_hotkey_is_lowercased_and_deduplicated() {
+        let mut settings = Settings {
+            panic_hotkey: vec!["Ctrl".into(), " CTRL ".into(), "F12".into(), "".into()],
+            ..Settings::default()
+        };
+        settings.sanitize();
+        assert_eq!(settings.panic_hotkey, vec!["ctrl", "f12"]);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tauri::State;
 
-use crate::config::model::{Mapping, Settings};
+use crate::config::model::{Action, ExceptionRule, Layer, Mapping, Settings};
 use crate::platform::elevation;
 use crate::platform::hooks::{self, InputSample};
 use crate::platform::service::CaptureMode;
@@ -108,6 +108,137 @@ pub fn set_mapping_enabled(
 }
 
 #[tauri::command]
+pub fn duplicate_mapping(
+    state: State<'_, AppState>,
+    profile_id: String,
+    mapping_id: String,
+) -> Result<Snapshot, String> {
+    state.duplicate_mapping(&profile_id, &mapping_id)
+}
+
+#[tauri::command]
+pub fn set_mappings_enabled(
+    state: State<'_, AppState>,
+    profile_id: String,
+    mapping_ids: Vec<String>,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    state.set_mappings_enabled(&profile_id, mapping_ids, enabled)
+}
+
+#[tauri::command]
+pub fn save_layer(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer: Layer,
+) -> Result<Snapshot, String> {
+    state.save_layer(&profile_id, layer)
+}
+
+#[tauri::command]
+pub fn delete_layer(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer_id: String,
+) -> Result<Snapshot, String> {
+    state.delete_layer(&profile_id, &layer_id)
+}
+
+#[tauri::command]
+pub fn set_layer_enabled(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer_id: String,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    state.set_layer_enabled(&profile_id, &layer_id, enabled)
+}
+
+#[tauri::command]
+pub fn save_layer_mapping(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer_id: String,
+    mapping: Mapping,
+) -> Result<Snapshot, String> {
+    state.save_layer_mapping(&profile_id, &layer_id, mapping)
+}
+
+#[tauri::command]
+pub fn delete_layer_mapping(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer_id: String,
+    mapping_id: String,
+) -> Result<Snapshot, String> {
+    state.delete_layer_mapping(&profile_id, &layer_id, &mapping_id)
+}
+
+#[tauri::command]
+pub fn set_layer_mapping_enabled(
+    state: State<'_, AppState>,
+    profile_id: String,
+    layer_id: String,
+    mapping_id: String,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    state.set_layer_mapping_enabled(&profile_id, &layer_id, &mapping_id, enabled)
+}
+
+#[tauri::command]
+pub fn save_exception(
+    state: State<'_, AppState>,
+    rule: ExceptionRule,
+) -> Result<Snapshot, String> {
+    state.save_exception(rule)
+}
+
+#[tauri::command]
+pub fn delete_exception(
+    state: State<'_, AppState>,
+    rule_id: String,
+) -> Result<Snapshot, String> {
+    state.delete_exception(&rule_id)
+}
+
+#[tauri::command]
+pub fn set_exception_enabled(
+    state: State<'_, AppState>,
+    rule_id: String,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    state.set_exception_enabled(&rule_id, enabled)
+}
+
+#[tauri::command]
+pub fn list_open_apps() -> Vec<crate::platform::foreground::OpenApp> {
+    crate::platform::foreground::list_open_apps()
+}
+
+#[tauri::command]
+pub fn test_action(state: State<'_, AppState>, action: Action) -> Result<(), String> {
+    state.test_action(action)
+}
+
+#[tauri::command]
+pub fn get_mapping_activity(
+    state: State<'_, AppState>,
+) -> Vec<crate::platform::service::MappingActivity> {
+    state.engine.activity_snapshot()
+}
+
+#[tauri::command]
+pub fn clear_mapping_activity(state: State<'_, AppState>) {
+    state.engine.clear_activity();
+}
+
+#[tauri::command]
+pub fn emergency_stop(state: State<'_, AppState>) -> Snapshot {
+    state.engine.panic();
+    state.snapshot()
+}
+
+#[tauri::command]
 pub fn import_profile(state: State<'_, AppState>, path: String) -> Result<Snapshot, String> {
     state.import_profile(&PathBuf::from(path))
 }
@@ -124,6 +255,38 @@ pub fn export_profile(
 #[tauri::command]
 pub fn reset_config(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.reset()
+}
+
+#[tauri::command]
+pub fn export_config(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    state.export_config(&PathBuf::from(path))
+}
+
+#[tauri::command]
+pub fn import_config(state: State<'_, AppState>, path: String) -> Result<Snapshot, String> {
+    state.import_config(&PathBuf::from(path))
+}
+
+#[tauri::command]
+pub fn list_backups(
+    state: State<'_, AppState>,
+) -> Vec<crate::config::store::BackupInfo> {
+    state.list_backups()
+}
+
+#[tauri::command]
+pub fn create_backup(
+    state: State<'_, AppState>,
+) -> Result<crate::config::store::BackupInfo, String> {
+    state.create_backup()
+}
+
+#[tauri::command]
+pub fn restore_backup(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Snapshot, String> {
+    state.restore_backup(&name)
 }
 
 #[tauri::command]

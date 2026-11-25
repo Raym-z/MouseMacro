@@ -4,10 +4,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::config::model::{Action, AppConfig, Mapping, Profile, Settings, Theme, Trigger};
+use crate::config::model::{
+    Action, AppConfig, ExceptionMode, ExceptionRule, Layer, Mapping, Profile, Settings, Theme,
+    Trigger,
+};
 use crate::config::store::ConfigStore;
 use crate::engine::keys::{normalize_combo, vk_from_name};
 use crate::platform::elevation;
+use crate::platform::hotkey;
 use crate::platform::service::{CaptureMode, EngineService};
 use crate::tray;
 
@@ -25,6 +29,13 @@ pub struct AppStatus {
     pub load_warning: Option<String>,
     pub hook_warning: Option<String>,
     pub last_error: Option<String>,
+    /// Lowercase executable name of the app in the foreground.
+    pub foreground_app: Option<String>,
+    /// Profile the engine is using, including per-app overrides.
+    pub effective_profile_id: String,
+    pub exception_mode: ExceptionMode,
+    pub panic_active: bool,
+    pub hotkey_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +99,11 @@ impl AppState {
                     .clone(),
                 hook_warning: self.engine.hook_warning(),
                 last_error: self.engine.last_error(),
+                foreground_app: self.engine.foreground_process(),
+                effective_profile_id: self.engine.effective_profile_id(),
+                exception_mode: self.engine.exception_mode(),
+                panic_active: self.engine.panic_active(),
+                hotkey_warning: hotkey::warning(),
             },
             config,
         }
@@ -108,6 +124,7 @@ impl AppState {
         }
 
         self.engine.reconfigure(&config);
+        hotkey::update(config.settings.panic_hotkey.clone());
         if apply_theme {
             apply_window_theme(&self.app, config.settings.theme);
         }
@@ -119,6 +136,10 @@ impl AppState {
     }
 
     pub fn set_enabled(&self, enabled: bool) -> Result<Snapshot, String> {
+        if enabled {
+            // Enabling is the explicit way out of the emergency stop.
+            self.engine.clear_panic();
+        }
         let mut config = self.cfg();
         config.settings.enabled = enabled;
         self.commit(config, false)
@@ -157,8 +178,12 @@ impl AppState {
             return Err("Double-click timing must be between 120 and 1000 ms.".into());
         }
         settings.sanitize();
+        if !settings.panic_hotkey.is_empty() {
+            hotkey::parse_combo(&settings.panic_hotkey)?;
+        }
 
         let mut config = self.cfg();
+        let was_enabled = config.settings.enabled;
         let want_autostart = settings.launch_at_startup;
         let registry = self.app.autolaunch();
         let current_registry = registry.is_enabled().unwrap_or(false);
@@ -176,6 +201,9 @@ impl AppState {
             }
         }
 
+        if settings.enabled && !was_enabled {
+            self.engine.clear_panic();
+        }
         config.settings = settings;
         match self.commit(config, true) {
             Ok(snapshot) => Ok(snapshot),
@@ -341,6 +369,301 @@ impl AppState {
         self.commit(config, false)
     }
 
+    pub fn duplicate_mapping(
+        &self,
+        profile_id: &str,
+        mapping_id: &str,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let index = profile
+            .mappings
+            .iter()
+            .position(|m| m.id == mapping_id)
+            .ok_or_else(|| "That mapping no longer exists.".to_string())?;
+        if profile.mappings.len() >= 500 {
+            return Err("This profile already has 500 mappings.".into());
+        }
+        let mut copy = profile.mappings[index].clone();
+        copy.id = uuid::Uuid::new_v4().to_string();
+        if let Some(name) = copy.name.as_mut() {
+            let base = name.clone();
+            name.clear();
+            name.push_str(&base.chars().take(52).collect::<String>());
+            name.push_str(" copy");
+        }
+        profile.mappings.insert(index + 1, copy);
+        self.commit(config, false)
+    }
+
+    pub fn set_mappings_enabled(
+        &self,
+        profile_id: &str,
+        mapping_ids: Vec<String>,
+        enabled: bool,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let mut changed = 0;
+        for mapping in &mut profile.mappings {
+            if mapping_ids.iter().any(|id| id == &mapping.id) {
+                mapping.enabled = enabled;
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            return Err("Those mappings no longer exist.".into());
+        }
+        self.commit(config, false)
+    }
+
+    pub fn save_layer(&self, profile_id: &str, mut layer: Layer) -> Result<Snapshot, String> {
+        validate_layer(&mut layer)?;
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        if layer.id.trim().is_empty() {
+            layer.id = uuid::Uuid::new_v4().to_string();
+        }
+        if profile
+            .layers
+            .iter()
+            .any(|existing| existing.id != layer.id && existing.activator == layer.activator)
+        {
+            return Err(format!(
+                "{} is already used as a layer button.",
+                layer.activator.label()
+            ));
+        }
+        if let Some(existing) = profile.layers.iter_mut().find(|l| l.id == layer.id) {
+            *existing = layer;
+        } else {
+            if profile.layers.len() >= 20 {
+                return Err("This profile already has 20 layers.".into());
+            }
+            profile.layers.push(layer);
+        }
+        self.commit(config, false)
+    }
+
+    pub fn delete_layer(
+        &self,
+        profile_id: &str,
+        layer_id: &str,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let before = profile.layers.len();
+        profile.layers.retain(|layer| layer.id != layer_id);
+        if profile.layers.len() == before {
+            return Err("That layer no longer exists.".into());
+        }
+        self.commit(config, false)
+    }
+
+    pub fn set_layer_enabled(
+        &self,
+        profile_id: &str,
+        layer_id: &str,
+        enabled: bool,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let layer = profile
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+            .ok_or_else(|| "That layer no longer exists.".to_string())?;
+        layer.enabled = enabled;
+        self.commit(config, false)
+    }
+
+    pub fn save_layer_mapping(
+        &self,
+        profile_id: &str,
+        layer_id: &str,
+        mut mapping: Mapping,
+    ) -> Result<Snapshot, String> {
+        validate_mapping(&mut mapping)?;
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let layer = profile
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+            .ok_or_else(|| "That layer no longer exists.".to_string())?;
+        if mapping.id.trim().is_empty() {
+            mapping.id = uuid::Uuid::new_v4().to_string();
+        }
+        if let Some(existing) = layer
+            .mappings
+            .iter_mut()
+            .find(|existing| existing.id == mapping.id)
+        {
+            *existing = mapping;
+        } else {
+            if layer.mappings.len() >= 200 {
+                return Err("This layer already has 200 mappings.".into());
+            }
+            layer.mappings.push(mapping);
+        }
+        self.commit(config, false)
+    }
+
+    pub fn delete_layer_mapping(
+        &self,
+        profile_id: &str,
+        layer_id: &str,
+        mapping_id: &str,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let layer = profile
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+            .ok_or_else(|| "That layer no longer exists.".to_string())?;
+        let before = layer.mappings.len();
+        layer.mappings.retain(|mapping| mapping.id != mapping_id);
+        if layer.mappings.len() == before {
+            return Err("That mapping no longer exists.".into());
+        }
+        self.commit(config, false)
+    }
+
+    pub fn set_layer_mapping_enabled(
+        &self,
+        profile_id: &str,
+        layer_id: &str,
+        mapping_id: &str,
+        enabled: bool,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let layer = profile
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+            .ok_or_else(|| "That layer no longer exists.".to_string())?;
+        let mapping = layer
+            .mappings
+            .iter_mut()
+            .find(|mapping| mapping.id == mapping_id)
+            .ok_or_else(|| "That mapping no longer exists.".to_string())?;
+        mapping.enabled = enabled;
+        self.commit(config, false)
+    }
+
+    pub fn save_exception(
+        &self,
+        mut rule: ExceptionRule,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let Some(process) = crate::config::model::normalize_process_name(&rule.process) else {
+            return Err("Enter an application executable, such as chrome.exe.".into());
+        };
+        rule.process = process;
+        if rule.mode == ExceptionMode::Profile {
+            let profile_id = rule
+                .profile_id
+                .clone()
+                .ok_or_else(|| "Choose the profile to use for this app.".to_string())?;
+            if !config.profiles.iter().any(|profile| profile.id == profile_id) {
+                return Err("That profile no longer exists.".into());
+            }
+        } else {
+            rule.profile_id = None;
+        }
+        if rule.id.trim().is_empty() {
+            rule.id = uuid::Uuid::new_v4().to_string();
+        }
+        if config
+            .exceptions
+            .iter()
+            .any(|existing| existing.id != rule.id && existing.process == rule.process)
+        {
+            return Err(format!(
+                "A rule for “{}” already exists.",
+                rule.process
+            ));
+        }
+        if let Some(existing) = config
+            .exceptions
+            .iter_mut()
+            .find(|existing| existing.id == rule.id)
+        {
+            *existing = rule;
+        } else {
+            if config.exceptions.len() >= 100 {
+                return Err("There are already 100 application rules.".into());
+            }
+            config.exceptions.push(rule);
+        }
+        self.commit(config, false)
+    }
+
+    pub fn delete_exception(&self, rule_id: &str) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let before = config.exceptions.len();
+        config.exceptions.retain(|rule| rule.id != rule_id);
+        if config.exceptions.len() == before {
+            return Err("That application rule no longer exists.".into());
+        }
+        self.commit(config, false)
+    }
+
+    pub fn set_exception_enabled(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let rule = config
+            .exceptions
+            .iter_mut()
+            .find(|rule| rule.id == rule_id)
+            .ok_or_else(|| "That application rule no longer exists.".to_string())?;
+        rule.enabled = enabled;
+        self.commit(config, false)
+    }
+
+    pub fn test_action(&self, mut action: Action) -> Result<(), String> {
+        validate_action(&mut action)?;
+        self.engine.test_action(&action);
+        Ok(())
+    }
+
     pub fn import_profile(&self, path: &std::path::Path) -> Result<Snapshot, String> {
         let mut imported = self.store.read_profile(path)?;
         imported.id = uuid::Uuid::new_v4().to_string();
@@ -390,6 +713,45 @@ impl AppState {
         Ok(path.to_string_lossy().to_string())
     }
 
+    pub fn export_config(&self, path: &std::path::Path) -> Result<String, String> {
+        self.store.write_config(&self.cfg(), path)?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    pub fn import_config(&self, path: &std::path::Path) -> Result<Snapshot, String> {
+        let mut config = self.store.read_config(path)?;
+        // Never let an imported file change Windows startup integration behind
+        // the user's back; the registry remains the source of truth.
+        config.settings.launch_at_startup = self.cfg().settings.launch_at_startup;
+        config.sanitize();
+        self.engine.clear_panic();
+        *self
+            .load_warning
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.commit(config, true)
+    }
+
+    pub fn restore_backup(&self, name: &str) -> Result<Snapshot, String> {
+        let mut config = self.store.read_backup(name)?;
+        config.settings.launch_at_startup = self.cfg().settings.launch_at_startup;
+        config.sanitize();
+        self.engine.clear_panic();
+        *self
+            .load_warning
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.commit(config, true)
+    }
+
+    pub fn list_backups(&self) -> Vec<crate::config::store::BackupInfo> {
+        self.store.list_backups()
+    }
+
+    pub fn create_backup(&self) -> Result<crate::config::store::BackupInfo, String> {
+        self.store.create_backup(&self.cfg())
+    }
+
     pub fn reset(&self) -> Result<Snapshot, String> {
         let registry = self.app.autolaunch();
         let _ = registry.disable();
@@ -399,6 +761,8 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.engine.clear_errors();
+        self.engine.clear_panic();
+        self.engine.clear_activity();
         let snapshot = self.commit(config, true)?;
         self.engine.set_capture_mode(CaptureMode::None)?;
         Ok(snapshot)
@@ -479,7 +843,13 @@ pub fn validate_mapping(mapping: &mut Mapping) -> Result<(), String> {
         }
     }
 
-    match &mut mapping.action {
+    validate_action(&mut mapping.action)
+}
+
+/// Validates and normalizes an action without needing a full mapping. Used by
+/// the editor's Test button.
+pub fn validate_action(action: &mut Action) -> Result<(), String> {
+    match action {
         Action::Shortcut { keys } | Action::HoldKeys { keys } => {
             *keys = normalize_combo(keys);
             if keys.is_empty() {
@@ -508,6 +878,27 @@ pub fn validate_mapping(mapping: &mut Mapping) -> Result<(), String> {
         | Action::MouseHold { .. }
         | Action::Disable
         | Action::None => {}
+    }
+    Ok(())
+}
+
+fn validate_layer(layer: &mut Layer) -> Result<(), String> {
+    let name = layer.name.trim();
+    if name.is_empty() {
+        return Err("Give the layer a name.".into());
+    }
+    if name.chars().count() > 60 {
+        return Err("Layer names can be at most 60 characters.".into());
+    }
+    layer.name = name.to_string();
+
+    let mut mapping_ids = Vec::new();
+    for mapping in &mut layer.mappings {
+        if mapping.id.trim().is_empty() || mapping_ids.contains(&mapping.id) {
+            mapping.id = uuid::Uuid::new_v4().to_string();
+        }
+        mapping_ids.push(mapping.id.clone());
+        validate_mapping(mapping)?;
     }
     Ok(())
 }

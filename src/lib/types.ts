@@ -28,11 +28,30 @@ export interface Mapping {
   enabled: boolean;
 }
 
+export interface Layer {
+  id: string;
+  name: string;
+  activator: MouseButton;
+  enabled: boolean;
+  mappings: Mapping[];
+}
+
 export interface Profile {
   id: string;
   name: string;
   description: string;
   mappings: Mapping[];
+  layers: Layer[];
+}
+
+export type ExceptionMode = "always" | "disable" | "profile";
+
+export interface ExceptionRule {
+  id: string;
+  process: string;
+  mode: ExceptionMode;
+  profileId: string | null;
+  enabled: boolean;
 }
 
 export type RuleCategory =
@@ -55,6 +74,10 @@ export interface Settings {
   /** Accept mouse/keyboard events synthesized by other input tools. */
   processInjectedInput: boolean;
   rulePriority: RuleCategory[];
+  /** Emergency stop combo. Empty disables the hotkey. */
+  panicHotkey: string[];
+  /** False on a fresh install; the guided setup sets it to true. */
+  onboarded: boolean;
 }
 
 export interface InputSample {
@@ -75,6 +98,24 @@ export interface AppConfig {
   settings: Settings;
   profiles: Profile[];
   activeProfileId: string;
+  exceptions: ExceptionRule[];
+}
+
+export interface MappingActivity {
+  mappingId: string;
+  ageMs: number;
+}
+
+export interface OpenApp {
+  process: string;
+  title: string;
+}
+
+export interface BackupInfo {
+  name: string;
+  path: string;
+  size: number;
+  savedAt: number;
 }
 
 export interface AppStatus {
@@ -89,6 +130,11 @@ export interface AppStatus {
   loadWarning: string | null;
   hookWarning: string | null;
   lastError: string | null;
+  foregroundApp: string | null;
+  effectiveProfileId: string;
+  exceptionMode: ExceptionMode;
+  panicActive: boolean;
+  hotkeyWarning: string | null;
 }
 
 export interface Snapshot {
@@ -110,7 +156,14 @@ export type CapturePayload =
 
 export type CaptureMode = "none" | "mouse" | "keyboard" | "monitor";
 
-export type View = "dashboard" | "mappings" | "profiles" | "settings" | "about";
+export type View =
+  | "dashboard"
+  | "mappings"
+  | "layers"
+  | "profiles"
+  | "exceptions"
+  | "settings"
+  | "about";
 
 export const MOUSE_BUTTONS: MouseButton[] = [
   "left",
@@ -121,6 +174,16 @@ export const MOUSE_BUTTONS: MouseButton[] = [
 ];
 
 export const DEFAULT_ACTION: Action = { type: "shortcut", keys: [] };
+
+export function newLayer(activator: MouseButton = "x2"): Layer {
+  return {
+    id: "",
+    name: "",
+    activator,
+    enabled: true,
+    mappings: [],
+  };
+}
 
 export function newMapping(button: MouseButton = "x2"): Mapping {
   return {
