@@ -4,6 +4,72 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.4.0] — 2026-11-25
+
+Keyboard remapping, standalone wheel triggers and a rebuilt recorder.
+
+### Added
+
+- **Keyboard remapping (opt-in)** — turn a key or key combination into another
+  key, or run any MouseMacro action. *Remap* keeps hold semantics (Caps Lock →
+  Ctrl), while *Run an action* fires once on key down. Matching is exact: a
+  plain `F12` mapping does not fire while Ctrl is held. Auto-repeat and the
+  matching key-up are handled, so held remaps release cleanly.
+- **Keyboard page** — profile selector, mapping list with search, duplicate and
+  shadow warnings, a dedicated *Keyboard* toggle with the same opt-in
+  acknowledgement as the other listening features, and per-app keyboard rules
+  in Exceptions.
+- **Standalone wheel triggers** — map the wheel itself to an action in all four
+  directions, including horizontal tilt left/right, without a button. Wheel
+  mappings have their own group in Button mappings and no pseudo-button.
+- **Wheel precedence and options** — button + wheel gesture → layer wheel
+  override → standalone wheel → pass through. An 80 ms cooldown per mapping
+  keeps a fast wheel from firing repeatedly; *also scroll* is off by default.
+- **Recording rebuilt around sessions** — Record/Stop with a live, scrollable
+  gesture log. Down/up pairs collapse into one row (“Left click”, “Wheel
+  left”), and a keyboard combination is captured as one entry (“Ctrl + Shift +
+  S”). Any row can be clicked to use that gesture instead; repeats collapse.
+  The log stays visible after Stop, and a session ends by itself after 20 s.
+- **Input from other tools while recording** — vendor utilities, remote
+  sessions and on-screen keyboards deliver input as injected events; recording
+  now accepts it. MouseMacro's own tagged output is still ignored.
+- **Recording safety nets** — the keyboard hook is reinstalled for every
+  recording, the active session is polled so a missed end event cannot leave a
+  stale “Listening” state, and the focused window records the key if the hook
+  misses it.
+- **Horizontal wheel diagnostics** — Settings now hints that `left`/`right`
+  wheel rows mean a thumb/tilt wheel.
+
+### Changed
+
+- Configuration schema is now **v4**. Existing v3 files migrate automatically;
+  keyboard settings, keyboard mappings and wheel mappings receive defaults.
+- A mapping's `button` is optional, so a wheel mapping carries no pseudo-button.
+- The keyboard hook is installed at startup only while keyboard remapping is
+  enabled and acknowledged; recording installs it on demand.
+- The mapping editor and keyboard editor share one action editor, so every
+  action type is available from both.
+- Emergency stop always wins over keyboard remapping, layers and wheel triggers.
+
+### Fixed
+
+- Keyboard combinations were recorded without their modifiers when the hook
+  swallowed the modifier keys. Held modifiers now come from the captured
+  stream instead of the OS key state.
+- Starting a new recording replayed the previous session's last gesture into
+  the field.
+- Events delivered just after Stop updated the log but not the mapping field.
+- Space or Enter pressed right after Record could activate Stop before the
+  session was listening.
+- A keyboard hook that Windows had silently dropped could leave recording
+  listening forever; recording now installs a fresh hook each time.
+
+### Tests
+
+- 116 Rust tests, including the keyboard matcher, wheel precedence and cooldown,
+  capture sessions and suppression, schema v4 migration, and the existing
+  engine, layer, exception, macro and scroll coverage.
+
 ## [1.3.0] — 2026-11-25
 
 Macros, richer actions and real scroll control.

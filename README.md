@@ -1,7 +1,7 @@
 # MouseMacro
 
-**Input studio for Windows** — remap mouse buttons, record shortcuts, and turn
-button holds into gestures with a native input engine.
+**Input studio for Windows** — remap mouse buttons and keys, record shortcuts,
+and turn button holds into gestures with a native input engine.
 
 Built with Tauri v2, React 19, TypeScript, Tailwind CSS 4 and Rust. Everything
 runs locally: no telemetry, no network calls, no background services.
@@ -27,6 +27,7 @@ runs locally: no telemetry, no network calls, no background services.
 | On release | Any release of the button |
 | Button + button | First button held, second pressed (chord) |
 | Button + wheel | Held while scrolling up / down / left / right |
+| Wheel | Scroll up / down / left / right without a button |
 
 ### Layers
 - Hold a button to activate a second mapping set for the other buttons (and
@@ -58,6 +59,20 @@ runs locally: no telemetry, no network calls, no background services.
 - Sticky **toggle keys** and **drag lock**
 - Disable the button (consume it silently) or explicit "no action"
 
+### Keyboard
+- **Opt-in** — installs an always-on low-level keyboard hook only while it is
+  enabled and acknowledged; off by default.
+- **Remap** a key or combination to another key with hold semantics (Caps Lock →
+  Ctrl, hold-to-walk), or **run any action** from it.
+- Matching is **exact**: a plain `F12` mapping does not fire while Ctrl is held,
+  and `Ctrl + F12` is a separate mapping.
+- Auto-repeat does not retrigger a mapping; the matching key-up releases a held
+  remap.
+- **Per-app rules** can disable keyboard remapping for games and secure apps.
+- **Privacy** — no text is stored and no keystroke history is kept; unmatched
+  keys pass through untouched.
+- The **emergency stop** always takes precedence.
+
 ### Scroll
 - Invert vertical and/or horizontal scrolling.
 - Swap axes when a driver reports the wrong wheel direction.
@@ -66,23 +81,34 @@ runs locally: no telemetry, no network calls, no background services.
   desktop is inverted.
 - Only physical wheel events are transformed; MouseMacro's own injected scroll
   is tagged and never remapped.
+- **Standalone wheel triggers** — map the wheel itself (up, down, horizontal
+  left/right, including thumb/tilt wheels) in Button mappings. Precedence is
+  button + wheel gesture → layer wheel override → standalone wheel → pass
+  through. A per-mapping 80 ms cooldown stops a fast wheel from firing
+  repeatedly, and *also scroll* is off by default.
 
 ### Choosing keys
 Two independent paths, both usable offline:
 
 1. **Choose** — a searchable key catalog (`page`, `f5`, `numpad`, `volume`, …)
    with modifier chips. Pure UI, no global hook involved.
-2. **Record** — captures the next physical shortcut through a low-level keyboard
-   hook that is installed only while recording, then removed from the input path.
+2. **Record** — captures the next shortcut through the shared capture session.
+   The log pairs presses into gestures, keeps them after Stop, and lets you
+   click any earlier gesture to use it instead. Input from vendor software,
+   remote sessions and on-screen keyboards is recorded too. A session ends by
+   itself after 20 seconds.
 
-If a game or secure window blocks the hook, path 1 always works and the app
-explains the failure instead of silently stopping.
+If a game or secure window blocks the global hook, the focused window records
+the key as a fallback, and path 1 always works.
 
 ### Gesture engine guarantees
 The engine is a pure state machine (`src-tauri/src/engine/`), tested without
 touching Windows APIs:
 
 - Gestures (button + button, button + wheel) always win over taps.
+- Wheel precedence is fixed: button + wheel gesture, layer override, standalone
+  wheel, then pass-through.
+- Keyboard matching is exact and repeat-safe; a held remap releases on key-up.
 - Long press wins over double click and single click.
 - A tap is suppressed once a gesture or long press has fired — no double action.
 - Unmatched input is replayed to the OS instead of being swallowed.
@@ -185,7 +211,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 87 engine/config/hook/service tests
+npm run test:rust   # 116 engine/config/hook/capture/service tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -200,7 +226,10 @@ low-level mouse hook ──► EngineService ──► pure engine ──► eff
 ```
 
 - `platform/hooks.rs` — `WH_MOUSE_LL` on a dedicated message-loop thread; the
-  keyboard hook is installed lazily on its own thread only for recording.
+  keyboard hook has its own thread, installed while keyboard remapping is
+  enabled and for every recording session.
+- `platform/capture.rs` — recording sessions: buffered events, gesture
+  selection, suppression of the recorded click and a 20 s watchdog.
 - `platform/service.rs` — adapts raw events to engine input, runs the timer for
   long press / double click deadlines, and executes effects.
 - `engine/` — UI-independent rules, state and timing. Deterministic and fully
@@ -213,7 +242,7 @@ low-level mouse hook ──► EngineService ──► pure engine ──► eff
   executes effects including cancellable macros.
 - `state.rs` — configuration, validation, snapshots and window control.
 - `src/` — React UI: Dashboard, Button mappings, Layers, Profiles, Exceptions,
-  Scroll, Settings, About.
+  Keyboard, Scroll, Settings, About.
 
 ## Configuration
 
@@ -222,7 +251,7 @@ atomically. Shape:
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "settings": {
     "enabled": true,
     "launchAtStartup": false,
@@ -234,6 +263,10 @@ atomically. Shape:
     "rulePriority": ["gesture", "longPress", "doubleClick", "release", "singleClick"],
     "panicHotkey": ["ctrl", "alt", "shift", "f12"],
     "onboarded": true,
+    "keyboard": {
+      "enabled": false,
+      "acknowledged": false
+    },
     "scroll": {
       "invertVertical": false,
       "invertHorizontal": false,
@@ -255,6 +288,24 @@ atomically. Shape:
           "trigger": { "type": "singleClick" },
           "action": { "type": "shortcut", "keys": ["ctrl", "z"] },
           "enabled": true
+        },
+        {
+          "id": "…",
+          "name": "Zoom in",
+          "button": null,
+          "trigger": { "type": "wheel", "direction": "up" },
+          "action": { "type": "shortcut", "keys": ["ctrl", "equal"] },
+          "enabled": true,
+          "wheel": { "cooldownMs": 80, "alsoScroll": false }
+        }
+      ],
+      "keyMappings": [
+        {
+          "id": "…",
+          "name": "Caps Lock to Ctrl",
+          "source": ["capslock"],
+          "behaviour": { "mode": "remap", "target": ["ctrl"] },
+          "enabled": true
         }
       ],
       "layers": [
@@ -275,7 +326,8 @@ atomically. Shape:
       "process": "game.exe",
       "mode": "disable",
       "profileId": null,
-      "enabled": true
+      "enabled": true,
+      "keyboardDisabled": false
     }
   ]
 }
@@ -288,11 +340,11 @@ and single click is configurable in Settings.
 
 ```
 src/                     React UI
-  components/            Sheet editor, key picker, reusable controls
-  hooks/useCapture.ts    backend capture bridge
+  components/            Sheet editor, key picker, capture log, controls
+  hooks/                 recording session bridge, diagnostics monitor
   lib/                   types, formatting, key catalog, API client
   pages/                 Dashboard, Mappings, Layers, Profiles, Exceptions,
-                         Settings, About
+                         Keyboard, Scroll, Settings, About
   state/                 app context (snapshot, view, run helpers)
 src-tauri/src/
   config/                model, defaults, atomic store, backups, import/export
@@ -310,7 +362,9 @@ src-tauri/src/
 | --- | --- |
 | No window after launch | It starts in the tray (`startMinimized`). Use the tray icon, or run the exe again to show the existing instance. Disable *Start minimized* in Settings. |
 | Closing the window doesn't quit | *Close to tray* is on. Use tray → Exit. |
-| Shortcut recording sees nothing | Some games/secure windows block keyboard hooks. Use **Choose** in the action section — no hook required. |
+| Shortcut recording sees nothing | Keep the MouseMacro window focused while recording; the focused window records the key if the global hook is blocked. In games or secure windows use **Choose** — no hook required. |
+| A keyboard remap does nothing | Check that **Keyboard** is on and acknowledged, that the combination matches exactly (`F12` is not `Ctrl + F12`), and that Exceptions does not disable the keyboard for the current app. |
+| A recording stops by itself | A recording session ends after 20 seconds. Press Record again. |
 | Scroll gestures do nothing | Settings → **Input diagnostics**: if wheel rows say `synthetic`, enable *Process input from other input tools*. If they say `horizontal`, the device is a thumb/tilt wheel — map `left`/`right` triggers. |
 | Hand-edited config.json has no effect | Settings → **Reload from disk** (or restart). The running app keeps its in-memory copy. |
 | Shortcuts don't work inside a game | If the game runs elevated, relaunch MouseMacro via *Settings → Run as administrator*. |
@@ -323,13 +377,14 @@ src-tauri/src/
 
 ## Roadmap
 
-1.3 added macros, launch/text/media/window actions, sticky toggles, drag lock and
-the Scroll tab. The remaining input-suite work is:
+1.4 added opt-in keyboard remapping, standalone wheel triggers and the rebuilt
+recorder. The remaining input-suite work is:
 
-1. **Mouse** (1.4) — Windows pointer speed, acceleration, primary button and
-   double-click time, with snapshot/restore.
-2. **Keyboard** (1.4) — key remapping, repeat delay/rate and per-app rules,
-   opt-in because it requires an always-on keyboard hook.
+1. **Pointer and keyboard timing** (1.5) — Windows pointer speed and
+   acceleration, primary button, double-click time, and keyboard repeat
+   delay/rate, with snapshot/restore.
+2. **Keyboard follow-ups** (1.5) — scan-code mode for non-US layouts, F12 as a
+   mouse modifier, and an opt-in keyboard diagnostics list.
 
 OS-level changes will snapshot and restore original Windows values, with explicit
 warnings and no silent modification.
