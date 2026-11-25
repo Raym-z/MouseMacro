@@ -151,12 +151,21 @@ impl CaptureSession {
     }
 }
 
+/// The last finished session, kept so the UI can still recover events it did
+/// not poll before Stop, the watchdog or a replacement ended the session.
+#[derive(Debug, Clone)]
+struct FinishedCapture {
+    id: u64,
+    events: Vec<CaptureEvent>,
+}
+
 /// Shared capture state: the active session plus delayed suppression that must
 /// outlive it (a swallowed down whose up has not arrived yet).
 #[derive(Debug, Default)]
 pub struct CaptureRuntime {
     next_id: u64,
     session: Option<CaptureSession>,
+    finished: Option<FinishedCapture>,
     /// Button whose down was swallowed; its up must be swallowed too.
     suppress_up: Option<MouseButton>,
     /// Key whose down was swallowed to stop a session (Escape).
@@ -167,7 +176,21 @@ impl CaptureRuntime {
     pub fn start(&mut self, kind: CaptureKind, now: u64) -> CaptureSessionInfo {
         self.next_id += 1;
         let id = self.next_id;
-        let session = CaptureSession::new(id, kind, now);
+        // Continue numbering across sessions: events from a later session must
+        // sort after every earlier one so the UI can tell "already applied"
+        // from "captured just now" without knowing the session id.
+        let base = self
+            .session
+            .as_ref()
+            .map(|session| session.seq)
+            .or_else(|| {
+                self.finished
+                    .as_ref()
+                    .and_then(|finished| finished.events.last().map(|event| event.seq))
+            })
+            .unwrap_or(0);
+        let mut session = CaptureSession::new(id, kind, now);
+        session.seq = base;
         self.session = Some(session);
         self.suppress_key_up = None;
         CaptureSessionInfo {
@@ -180,7 +203,9 @@ impl CaptureRuntime {
     /// component cannot kill the session that replaced it.
     pub fn stop(&mut self, id: u64) -> bool {
         if self.session.as_ref().is_some_and(|session| session.id == id) {
-            self.session = None;
+            if let Some(session) = self.session.take() {
+                self.archive(session);
+            }
             return true;
         }
         false
@@ -190,7 +215,22 @@ impl CaptureRuntime {
     /// Escape and the watchdog.
     pub fn stop_any(&mut self) -> Option<(u64, CaptureKind)> {
         let session = self.session.take()?;
-        Some((session.id, session.kind))
+        let id = session.id;
+        let kind = session.kind;
+        self.archive(session);
+        Some((id, kind))
+    }
+
+    fn archive(&mut self, session: CaptureSession) {
+        self.finished = Some(FinishedCapture {
+            id: session.id,
+            events: session.events.into_iter().collect(),
+        });
+    }
+
+    /// The session currently accepting input, if any.
+    pub fn active_id(&self) -> Option<u64> {
+        self.session.as_ref().map(|session| session.id)
     }
 
     pub fn expire(&mut self, now: u64) -> Option<(u64, CaptureKind)> {
@@ -368,16 +408,23 @@ impl CaptureRuntime {
     }
 
     pub fn events_since(&self, id: u64, since_seq: u64) -> Option<Vec<CaptureEvent>> {
-        let session = self.session.as_ref()?;
-        if session.id != id {
+        let events: Vec<CaptureEvent> = if let Some(session) = self.session.as_ref() {
+            if session.id != id {
+                return None;
+            }
+            session.events.iter().cloned().collect()
+        } else if let Some(finished) = self.finished.as_ref() {
+            if finished.id != id {
+                return None;
+            }
+            finished.events.clone()
+        } else {
             return None;
-        }
+        };
         Some(
-            session
-                .events
-                .iter()
+            events
+                .into_iter()
                 .filter(|event| event.seq > since_seq)
-                .cloned()
                 .collect(),
         )
     }
@@ -538,6 +585,36 @@ mod tests {
         assert_eq!(expired, id);
         assert_eq!(kind, CaptureKind::Keyboard);
         assert_eq!(runtime.session_id(), None);
+    }
+
+    #[test]
+    fn sessions_continue_the_sequence() {
+        let mut runtime = runtime();
+        let first = runtime.start(CaptureKind::Keyboard, 0);
+        runtime.record_key(1, 0x41, true, InputMeta::physical());
+        runtime.record_key(2, 0x41, false, InputMeta::physical());
+        runtime.stop(first.id);
+        runtime.start(CaptureKind::Keyboard, 10);
+        let (_, event) = runtime
+            .record_key(20, 0x42, true, InputMeta::physical())
+            .unwrap();
+        assert!(
+            event.seq > 2,
+            "a new session must not reuse the previous session's sequence numbers"
+        );
+    }
+
+    #[test]
+    fn finished_sessions_keep_their_events_for_late_readers() {
+        let mut runtime = runtime();
+        let info = runtime.start(CaptureKind::Keyboard, 0);
+        runtime.record_key(10, 0x41, true, InputMeta::physical());
+        assert_eq!(runtime.active_id(), Some(info.id));
+        assert!(runtime.stop(info.id));
+        assert_eq!(runtime.active_id(), None);
+        let events = runtime.events_since(info.id, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].token.as_deref(), Some("a"));
     }
 
     #[test]

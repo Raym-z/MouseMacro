@@ -169,6 +169,7 @@ pub fn run() {
             commands::start_capture,
             commands::stop_capture,
             commands::get_capture_events,
+            commands::active_capture_session,
             commands::clear_warnings,
             commands::dismiss_banner,
             commands::open_config_folder,

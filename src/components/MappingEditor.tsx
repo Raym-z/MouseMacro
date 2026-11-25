@@ -601,12 +601,13 @@ export function MappingSheet({
   const toggleCapture = (target: "button" | "keys") => {
     const next = captureTarget === target ? null : target;
     if (next !== null) {
-      // Replaying the previous session's events into a freshly focused field
-      // would be surprising; only apply input captured from now on.
+      // The Record button keeps focus and turns into Stop, so a Space or Enter
+      // pressed before the hook is listening would end the session again.
+      (document.activeElement as HTMLElement | null)?.blur();
+      // Skip input from earlier sessions that is still shown in the kept log:
+      // those have lower sequence numbers and must not overwrite the field.
       setAppliedSeq(
-        captureTarget === null
-          ? 0
-          : capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
+        capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
       );
       setManualPick(false);
     }

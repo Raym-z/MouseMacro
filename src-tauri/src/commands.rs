@@ -370,6 +370,13 @@ pub fn get_capture_events(
     state.capture_events(session_id, since_seq)
 }
 
+/// The session still accepting input. The UI polls this while recording so a
+/// missed end event cannot leave it listening to a session that is gone.
+#[tauri::command]
+pub fn active_capture_session(state: State<'_, AppState>) -> Option<u64> {
+    state.active_capture_session()
+}
+
 #[tauri::command]
 pub fn clear_warnings(state: State<'_, AppState>) -> Snapshot {
     state.clear_warnings()

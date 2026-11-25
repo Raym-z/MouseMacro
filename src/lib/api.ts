@@ -152,6 +152,7 @@ export const api = {
     invoke<void>("stop_capture", { sessionId }),
   getCaptureEvents: (sessionId: number, sinceSeq: number) =>
     invoke<CaptureEvent[]>("get_capture_events", { sessionId, sinceSeq }),
+  activeCaptureSession: () => invoke<number | null>("active_capture_session"),
   clearWarnings: () => invoke<Snapshot>("clear_warnings"),
   openConfigFolder: () => invoke<void>("open_config_folder"),
   relaunchElevated: () => invoke<void>("relaunch_elevated"),

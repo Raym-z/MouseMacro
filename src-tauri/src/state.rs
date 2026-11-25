@@ -183,6 +183,11 @@ impl AppState {
         self.engine.capture_events(session_id, since_seq)
     }
 
+    /// The recording session that is still accepting input, if any.
+    pub fn active_capture_session(&self) -> Option<u64> {
+        self.engine.active_capture_session()
+    }
+
     pub fn set_active_profile(&self, profile_id: &str) -> Result<Snapshot, String> {
         let mut config = self.cfg();
         if !config.profiles.iter().any(|p| p.id == profile_id) {

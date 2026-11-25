@@ -43,6 +43,7 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
     }
 
     let cancelled = false;
+    let finished = false;
     let unEvent: UnlistenFn | undefined;
     let unEnded: UnlistenFn | undefined;
     let lastSeq = 0;
@@ -62,6 +63,14 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
       });
     };
 
+    const finish = () => {
+      if (cancelled || finished) return;
+      finished = true;
+      sessionRef.current = null;
+      setReady(false);
+      endedRef.current();
+    };
+
     const start = async () => {
       setEvents([]);
       setReady(false);
@@ -79,7 +88,7 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
           merge([message.payload.event]);
         });
         unEnded = await listen<CaptureEndedMessage>("capture://ended", (message) => {
-          if (cancelled) return;
+          if (cancelled || finished) return;
           // Ignore endings for a replaced session, including one emitted while
           // start_capture is still returning.
           if (
@@ -88,9 +97,7 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
           ) {
             return;
           }
-          sessionRef.current = null;
-          setReady(false);
-          endedRef.current();
+          finish();
         });
 
         const info = await api.startCapture(kind);
@@ -121,22 +128,27 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
 
     void start();
 
-    // Safety net: recover events if an event ever fails to arrive.
+    // Safety net: recover events if an event ever fails to arrive, and notice
+    // a session the backend ended without the UI hearing about it.
     const poll = window.setInterval(() => {
       const id = sessionRef.current;
-      if (id === null) return;
-      void api
-        .getCaptureEvents(id, lastSeq)
-        .then((missing) => merge(missing))
-        .catch(() => undefined);
+      if (id === null || finished) return;
+      void Promise.all([
+        api.getCaptureEvents(id, lastSeq).catch(() => [] as CaptureEvent[]),
+        api.activeCaptureSession().catch(() => null),
+      ]).then(([missing, active]) => {
+        if (cancelled || finished || sessionRef.current !== id) return;
+        merge(missing);
+        if (active === null || active !== id) {
+          finish();
+        }
+      });
     }, 1_000);
 
     const watchdog = window.setTimeout(() => {
       const id = sessionRef.current;
-      sessionRef.current = null;
-      setReady(false);
       if (id !== null) void api.stopCapture(id).catch(() => undefined);
-      endedRef.current();
+      finish();
     }, FRONTEND_TIMEOUT_MS);
 
     return () => {

@@ -258,9 +258,24 @@ pub fn enable_keyboard_hook() -> Result<(), String> {
             }
 
             let _ = UnhookWindowsHookEx(hook);
-            KEY_HOOK_HANDLE.store(0, Ordering::SeqCst);
-            KEYBOARD_THREAD_ID.store(0, Ordering::SeqCst);
-            KEYBOARD_THREAD_RUNNING.store(false, Ordering::SeqCst);
+            let handle_value = hook.0 as i64;
+            let _ = KEY_HOOK_HANDLE.compare_exchange(
+                handle_value,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            let _ = KEYBOARD_THREAD_ID.compare_exchange(
+                thread_id,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            if KEY_HOOK_HANDLE.load(Ordering::SeqCst) == 0
+                && KEYBOARD_THREAD_ID.load(Ordering::SeqCst) == 0
+            {
+                KEYBOARD_THREAD_RUNNING.store(false, Ordering::SeqCst);
+            }
         });
 
     if let Err(error) = spawn {
@@ -275,6 +290,22 @@ pub fn enable_keyboard_hook() -> Result<(), String> {
         Ok(Err(error)) => Err(format!("Could not install the keyboard hook: {error}")),
         Err(_) => Err("The keyboard hook thread did not start in time.".into()),
     }
+}
+
+/// Restarts the keyboard hook from a clean slate. Windows can silently remove a
+/// low-level hook (for example after a slow callback), leaving the handle
+/// behind, so recording installs a fresh hook instead of trusting an old one.
+pub fn restart_keyboard_hook() -> Result<(), String> {
+    disable_keyboard_hook();
+    if KEY_HOOK_HANDLE.load(Ordering::SeqCst) != 0 {
+        // The old thread is still live; installing a second hook would leave
+        // the two fighting over the shared statics.
+        return Ok(());
+    }
+    // A thread that panicked or exited without cleaning up leaves the running
+    // flag behind; there is no live hook in that case, so reclaim it.
+    KEYBOARD_THREAD_RUNNING.store(false, Ordering::SeqCst);
+    enable_keyboard_hook()
 }
 
 /// Removes the keyboard hook when remapping is turned off. Capture mode owns

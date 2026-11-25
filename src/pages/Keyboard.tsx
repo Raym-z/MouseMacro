@@ -453,10 +453,13 @@ function KeyMappingSheet({
   const toggleCapture = (target: "source" | "target" | "keys") => {
     const next = captureTarget === target ? null : target;
     if (next !== null) {
+      // The Record button keeps focus and turns into Stop, so a Space or Enter
+      // pressed before the hook is listening would end the session again.
+      (document.activeElement as HTMLElement | null)?.blur();
+      // Skip input from earlier sessions that is still shown in the kept log:
+      // those have lower sequence numbers and must not overwrite the field.
       setAppliedSeq(
-        captureTarget === null
-          ? 0
-          : capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
+        capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
       );
       setManualPick(false);
     }
@@ -468,12 +471,15 @@ function KeyMappingSheet({
     if (event.source !== "keyboard" || event.kind !== "down" || !event.token) {
       return;
     }
+    // Apply to the field that was recording, not the one that is recording
+    // now: an event delivered just after Stop must still land in the source.
+    const target = captureTarget ?? lastTarget;
     const combo = [...event.modifiers, event.token];
-    if (captureTarget === "source") {
+    if (target === "source") {
       setSource(combo);
-    } else if (captureTarget === "target") {
+    } else if (target === "target") {
       setTarget(combo);
-    } else if (captureTarget === "keys") {
+    } else if (target === "keys") {
       if (action.type === "key") {
         setAction({ type: "key", key: event.token });
       } else if (
@@ -512,7 +518,7 @@ function KeyMappingSheet({
     if (!selected || selected.seq <= appliedSeq) return;
     setAppliedSeq(selected.seq);
     applyCaptured(selected);
-  }, [capture.events, appliedSeq, manualPick, captureTarget, action]);
+  }, [capture.events, appliedSeq, manualPick, lastTarget, action]);
 
   useEffect(() => {
     if (!capture.error) return;

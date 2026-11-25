@@ -850,7 +850,7 @@ impl EngineService {
         );
 
         if kind == CaptureKind::Keyboard {
-            if let Err(error) = crate::platform::hooks::enable_keyboard_hook() {
+            if let Err(error) = crate::platform::hooks::restart_keyboard_hook() {
                 let message = format!("Keyboard recording is unavailable: {error}");
                 self.set_hook_warning(Some(message.clone()));
                 self.stop_session(Some(info.id), "failed");
@@ -880,6 +880,15 @@ impl EngineService {
             .unwrap_or_else(|e| e.into_inner())
             .events_since(id, since_seq)
             .unwrap_or_default()
+    }
+
+    /// The session still accepting input, if any. The UI polls this so a
+    /// missed `capture://ended` event cannot leave a dead session on screen.
+    pub fn active_capture_session(&self) -> Option<u64> {
+        self.capture_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_id()
     }
 
     /// Stops a session, emitting `capture://ended` so the UI can leave the
