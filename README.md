@@ -246,3 +246,7 @@ customisation suite with six tabs:
 
 OS-level changes will snapshot and restore original Windows values, with explicit
 warnings and no silent modification.
+
+## Changelog
+
+Release notes for every version live in [CHANGELOG.md](CHANGELOG.md).
