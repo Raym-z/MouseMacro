@@ -972,16 +972,41 @@ impl EngineService {
             .unwrap_or_else(|e| e.into_inner());
 
         if capture.session_kind() == Some(CaptureKind::Mouse) {
+            // Recording accepts any input except MouseMacro's own injections.
+            // The "process input from other tools" setting protects the
+            // mapping engine from loops; while the user is explicitly
+            // recording, input from vendor or remote tools must be recordable.
             let recorded = match input {
-                MouseInput::Down(button) => {
-                    capture.record_mouse(time, Some(button), true, None, meta)
-                }
-                MouseInput::Up(button) => {
-                    capture.record_mouse(time, Some(button), false, None, meta)
-                }
-                MouseInput::Wheel { direction, .. } => {
-                    capture.record_mouse(time, None, false, Some(direction), meta)
-                }
+                MouseInput::Down(button) => capture.record_mouse(
+                    time,
+                    Some(button),
+                    true,
+                    None,
+                    InputMeta {
+                        accepted: !meta.own,
+                        ..meta
+                    },
+                ),
+                MouseInput::Up(button) => capture.record_mouse(
+                    time,
+                    Some(button),
+                    false,
+                    None,
+                    InputMeta {
+                        accepted: !meta.own,
+                        ..meta
+                    },
+                ),
+                MouseInput::Wheel { direction, .. } => capture.record_mouse(
+                    time,
+                    None,
+                    false,
+                    Some(direction),
+                    InputMeta {
+                        accepted: !meta.own,
+                        ..meta
+                    },
+                ),
             };
             if let Some((id, event, selected)) = recorded {
                 let suppress = selected
@@ -1106,14 +1131,22 @@ impl EngineService {
                 }
             }
 
-            let recorded = capture.record_key(time, vk, is_down, meta);
+            // Recording accepts any input except MouseMacro's own injections:
+            // vendor utilities, remote sessions and on-screen keyboards often
+            // deliver input as injected events, and they must still be
+            // recordable even when the mapping engine ignores injected input.
+            let recording = InputMeta {
+                accepted: !meta.own,
+                ..meta
+            };
+            let recorded = capture.record_key(time, vk, is_down, recording);
             if let Some((id, event)) = recorded {
                 drop(capture);
                 self.emit_capture_event(id, &event);
-                // Physical keys never reach the focused app while recording.
-                // Injected or own events still pass so remaps and macros are
-                // not broken by an open session.
-                return meta.accepted;
+                // Keys recorded from the user never reach the focused app.
+                // MouseMacro's own injected output still passes through so
+                // remaps and macros are not broken by an open session.
+                return recording.accepted;
             }
         }
 

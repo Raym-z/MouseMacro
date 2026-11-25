@@ -446,8 +446,34 @@ function KeyMappingSheet({
     setNewStepType("tapKeys");
   }, [open, mapping]);
 
-  const capture = useCaptureSession(captureTarget === null ? null : "keyboard", () =>
-    setCaptureTarget(null),
+  // Applies a recorded combination to the field that was recording. Delayed
+  // events and log picks keep working after Stop, so `lastTarget` is the
+  // fallback when nothing is recording any more.
+  const applyKeys = (keys: string[]) => {
+    const token = keys[keys.length - 1];
+    if (!token) return;
+    const target = captureTarget ?? lastTarget;
+    if (target === "source") {
+      setSource(keys);
+    } else if (target === "target") {
+      setTarget(keys);
+    } else if (target === "keys") {
+      if (action.type === "key") {
+        setAction({ type: "key", key: token });
+      } else if (
+        action.type === "shortcut" ||
+        action.type === "holdKeys" ||
+        action.type === "toggleKeys"
+      ) {
+        setAction({ ...action, keys });
+      }
+    }
+  };
+
+  const capture = useCaptureSession(
+    captureTarget === null ? null : "keyboard",
+    () => setCaptureTarget(null),
+    applyKeys,
   );
 
   const toggleCapture = (target: "source" | "target" | "keys") => {
@@ -471,25 +497,7 @@ function KeyMappingSheet({
     if (event.source !== "keyboard" || event.kind !== "down" || !event.token) {
       return;
     }
-    // Apply to the field that was recording, not the one that is recording
-    // now: an event delivered just after Stop must still land in the source.
-    const target = captureTarget ?? lastTarget;
-    const combo = [...event.modifiers, event.token];
-    if (target === "source") {
-      setSource(combo);
-    } else if (target === "target") {
-      setTarget(combo);
-    } else if (target === "keys") {
-      if (action.type === "key") {
-        setAction({ type: "key", key: event.token });
-      } else if (
-        action.type === "shortcut" ||
-        action.type === "holdKeys" ||
-        action.type === "toggleKeys"
-      ) {
-        setAction({ ...action, keys: combo });
-      }
-    }
+    applyKeys([...event.modifiers, event.token]);
   };
 
   const pickCaptured = (event: CaptureEvent) => {

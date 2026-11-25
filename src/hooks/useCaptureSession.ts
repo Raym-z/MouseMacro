@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../lib/api";
+import { isModifierToken, tokenFromKeyboardEvent } from "../lib/keys";
 import type { CaptureEvent, CaptureKind } from "../lib/types";
 
 const MAX_EVENTS = 64;
@@ -24,12 +25,18 @@ interface CaptureEndedMessage {
  *
  * `kind` is the source of truth: set it to start, clear it to stop.
  */
-export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void) {
+export function useCaptureSession(
+  kind: CaptureKind | null,
+  onEnded: () => void,
+  onLocalKey?: (keys: string[]) => void,
+) {
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endedRef = useRef(onEnded);
   endedRef.current = onEnded;
+  const localRef = useRef(onLocalKey);
+  localRef.current = onLocalKey;
   const sessionRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -170,12 +177,38 @@ export function useCaptureSession(kind: CaptureKind | null, onEnded: () => void)
     const handler = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       const id = sessionRef.current;
       sessionRef.current = null;
       setReady(false);
       if (id !== null) void api.stopCapture(id).catch(() => undefined);
       endedRef.current();
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [kind]);
+
+  // Fallback for when the low-level hook does not see the keyboard: while a
+  // keyboard session runs, the focused window still receives the keys. If the
+  // hook works it swallows them and this listener never fires; if it does not,
+  // the key is still recorded and Space/Enter cannot activate Stop.
+  useEffect(() => {
+    if (kind !== "keyboard") return;
+    const handler = (event: KeyboardEvent) => {
+      if (sessionRef.current === null) return;
+      if (event.key === "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat) return;
+      const token = tokenFromKeyboardEvent(event);
+      if (!token || isModifierToken(token)) return;
+      const modifiers = [
+        event.ctrlKey ? "ctrl" : null,
+        event.shiftKey ? "shift" : null,
+        event.altKey ? "alt" : null,
+        event.metaKey ? "win" : null,
+      ].filter((modifier): modifier is string => modifier !== null);
+      localRef.current?.([...modifiers, token]);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);

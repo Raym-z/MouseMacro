@@ -596,7 +596,27 @@ export function MappingSheet({
         ? "keyboard"
         : null;
 
-  const capture = useCaptureSession(sessionKind, () => setCaptureTarget(null));
+  // Keyboard capture in this sheet always feeds the action's key combination;
+  // the trigger button is recorded through the mouse session.
+  const applyKeys = (keys: string[]) => {
+    const token = keys[keys.length - 1];
+    if (!token) return;
+    if (action.type === "key") {
+      setAction({ type: "key", key: token });
+    } else if (
+      action.type === "shortcut" ||
+      action.type === "holdKeys" ||
+      action.type === "toggleKeys"
+    ) {
+      setAction({ ...action, keys });
+    }
+  };
+
+  const capture = useCaptureSession(
+    sessionKind,
+    () => setCaptureTarget(null),
+    applyKeys,
+  );
 
   const toggleCapture = (target: "button" | "keys") => {
     const next = captureTarget === target ? null : target;
@@ -627,16 +647,7 @@ export function MappingSheet({
       return;
     }
     if (event.source === "keyboard" && event.kind === "down" && event.token) {
-      const combo = [...event.modifiers, event.token];
-      if (action.type === "key") {
-        setAction({ type: "key", key: event.token });
-      } else if (
-        action.type === "shortcut" ||
-        action.type === "holdKeys" ||
-        action.type === "toggleKeys"
-      ) {
-        setAction({ ...action, keys: combo });
-      }
+      applyKeys([...event.modifiers, event.token]);
     }
   };
 
