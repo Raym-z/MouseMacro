@@ -224,8 +224,13 @@ pub fn normalize_combo(keys: &[String]) -> Vec<String> {
     ordered_for_press(&out)
 }
 
-pub fn is_modifier_vk(vk: u16) -> bool {
-    matches!(
+/// True when a canonical token names one of the four modifiers.
+pub fn is_modifier_name(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    MODIFIER_ORDER.iter().any(|modifier| *modifier == lower)
+}
+
+pub fn is_modifier_vk(vk: u16) -> bool {    matches!(
         vk,
         VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN | 0xA0..=0xA5
     )

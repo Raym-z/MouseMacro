@@ -142,6 +142,417 @@ const MACRO_STEP_OPTIONS: Array<{ value: MacroStepType; label: string }> = [
   { value: "typeText", label: "Type text" },
 ];
 
+/**
+ * The action editor, shared by mouse mappings and keyboard mappings. It owns
+ * the per-type fields and the macro builder; capture wiring stays with the
+ * parent so both editors can reuse the same recording flow.
+ */
+export function ActionFields({
+  action,
+  setAction,
+  captureTarget,
+  setCaptureTarget,
+  setLiveModifiers,
+  newStepType,
+  setNewStepType,
+}: {
+  action: Action;
+  setAction: (action: Action) => void;
+  captureTarget: "button" | "keys" | null;
+  setCaptureTarget: (target: "button" | "keys" | null) => void;
+  setLiveModifiers: (keys: string[]) => void;
+  newStepType: MacroStepType;
+  setNewStepType: (type: MacroStepType) => void;
+}) {
+  const needsKeys =
+    action.type === "shortcut" || action.type === "holdKeys" || action.type === "key";
+  const recordedKeys =
+    action.type === "shortcut" || action.type === "holdKeys"
+      ? action.keys
+      : action.type === "key" && action.key
+        ? [action.key]
+        : [];
+
+  return (
+    <>
+      <StepSection
+        index="3"
+        title="Action"
+        hint="What should happen when the trigger is detected?"
+      >
+        <Field label="Action type">
+          <Select
+            value={action.type}
+            onChange={(event) =>
+              setAction(defaultAction(event.target.value as Action["type"]))
+            }
+          >
+            {ACTION_TYPES.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+
+        {needsKeys && (
+          <div className="mt-3">
+            <KeySelector
+              mode={action.type === "key" ? "single" : "combo"}
+              keys={recordedKeys}
+              onChange={(keys) => {
+                if (action.type === "key") {
+                  setAction({ type: "key", key: keys[0] ?? "" });
+                } else if (action.type === "shortcut" || action.type === "holdKeys") {
+                  setAction({ ...action, keys });
+                }
+              }}
+              onRecord={() => {
+                setLiveModifiers([]);
+                setCaptureTarget("keys");
+              }}
+              recording={captureTarget === "keys"}
+            />
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              {action.type === "holdKeys"
+                ? "Keys stay held until the trigger button is released. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."
+                : "Keys are pressed and released together. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."}
+            </p>
+          </div>
+        )}
+
+        {(action.type === "mouseClick" || action.type === "mouseHold") && (
+          <div className="mt-3">
+            <Field label="Mouse button">
+              <Segmented
+                value={action.button}
+                onChange={(mouseButton) =>
+                  setAction({ ...action, button: mouseButton })
+                }
+                options={MOUSE_BUTTONS.map((candidate) => ({
+                  value: candidate,
+                  label: buttonLabel(candidate),
+                }))}
+              />
+            </Field>
+          </div>
+        )}
+
+        {action.type === "scroll" && (
+          <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_120px]">
+            <Field label="Direction">
+              <Segmented
+                value={action.direction}
+                onChange={(direction) =>
+                  setAction({ ...action, direction })
+                }
+                options={(
+                  ["up", "down", "left", "right"] as ScrollDirection[]
+                ).map((direction) => ({
+                  value: direction,
+                  label: direction.charAt(0).toUpperCase() + direction.slice(1),
+                }))}
+              />
+            </Field>
+            <Field label="Amount" hint="1–50 notches">
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={action.amount}
+                onChange={(event) =>
+                  setAction({
+                    ...action,
+                    amount: Math.max(
+                      1,
+                      Math.min(50, Number(event.target.value) || 1),
+                    ),
+                  })
+                }
+                className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+              />
+            </Field>
+          </div>
+        )}
+
+        {action.type === "macro" && (
+          <div className="mt-3 space-y-3">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Repeat" hint="1–100 times">
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={action.repeat}
+                  onChange={(event) =>
+                    setAction({
+                      ...action,
+                      repeat: Math.max(
+                        1,
+                        Math.min(100, Number(event.target.value) || 1),
+                      ),
+                    })
+                  }
+                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                />
+              </Field>
+              <Field label="Interval" hint="ms between repeats">
+                <input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={action.intervalMs}
+                  onChange={(event) =>
+                    setAction({
+                      ...action,
+                      intervalMs: Math.max(
+                        0,
+                        Math.min(10000, Number(event.target.value) || 0),
+                      ),
+                    })
+                  }
+                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                />
+              </Field>
+              <div className="flex items-end">
+                <div className="flex h-9 w-full items-center justify-between rounded-[9px] border border-zinc-200 px-3 dark:border-white/10">
+                  <span className="text-[12px]">Toggle</span>
+                  <Switch
+                    size="sm"
+                    checked={action.toggle}
+                    onChange={(toggle) => setAction({ ...action, toggle })}
+                    label="Press again to stop the macro"
+                  />
+                </div>
+              </div>
+            </div>
+            {action.toggle && (
+              <p className="text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                Pressing the same button again stops the macro and releases
+                everything it holds. The panic hotkey always stops it too.
+              </p>
+            )}
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[12px] font-medium">
+                  Steps · {action.steps.length}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={newStepType}
+                    onChange={(event) =>
+                      setNewStepType(event.target.value as MacroStepType)
+                    }
+                    className="focus-ring h-7 rounded-lg border border-zinc-200 bg-white px-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                  >
+                    {MACRO_STEP_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<Plus />}
+                    onClick={() =>
+                      setAction({
+                        ...action,
+                        steps: [...action.steps, newMacroStep(newStepType)],
+                      })
+                    }
+                  >
+                    Add step
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {action.steps.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-zinc-200 px-3 py-5 text-center text-[11.5px] text-zinc-400 dark:border-white/10">
+                    Add the first step above. Steps run in order, top to bottom.
+                  </div>
+                ) : (
+                  action.steps.map((step, index) => (
+                    <MacroStepRow
+                      key={index}
+                      step={step}
+                      index={index}
+                      total={action.steps.length}
+                      onChange={(next) =>
+                        setAction({
+                          ...action,
+                          steps: action.steps.map((candidate, position) =>
+                            position === index ? next : candidate,
+                          ),
+                        })
+                      }
+                      onMove={(direction) => {
+                        const target = index + direction;
+                        if (target < 0 || target >= action.steps.length) return;
+                        const steps = [...action.steps];
+                        [steps[index], steps[target]] = [
+                          steps[target],
+                          steps[index],
+                        ];
+                        setAction({ ...action, steps });
+                      }}
+                      onDuplicate={() =>
+                        setAction({
+                          ...action,
+                          steps: [
+                            ...action.steps.slice(0, index + 1),
+                            { ...step },
+                            ...action.steps.slice(index + 1),
+                          ],
+                        })
+                      }
+                      onRemove={() =>
+                        setAction({
+                          ...action,
+                          steps: action.steps.filter(
+                            (_, position) => position !== index,
+                          ),
+                        })
+                      }
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {action.type === "launch" && (
+          <div className="mt-3">
+            <Field
+              label="Target"
+              hint="A program, file, folder or URL. Windows opens it with the default handler."
+            >
+              <input
+                value={action.target}
+                maxLength={1000}
+                onChange={(event) =>
+                  setAction({ ...action, target: event.target.value })
+                }
+                placeholder="notepad.exe  ·  https://example.com  ·  C:\folder"
+                className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 font-mono text-[12px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+              />
+            </Field>
+            <Callout tone="warning" className="mt-3">
+              Launch actions run with your user account. Profiles imported from
+              elsewhere ask for confirmation before any target is saved.
+            </Callout>
+          </div>
+        )}
+
+        {action.type === "typeText" && (
+          <div className="mt-3">
+            <Field
+              label="Text"
+              hint="Typed as Unicode, so non-Latin characters work. Add a wait or click step first if focus may change."
+            >
+              <textarea
+                value={action.text}
+                maxLength={2000}
+                rows={3}
+                onChange={(event) =>
+                  setAction({ ...action, text: event.target.value })
+                }
+                placeholder="Text to type into the focused window"
+                className="focus-ring w-full resize-y rounded-[9px] border border-zinc-200 bg-white px-3 py-2 text-[12.5px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
+              />
+            </Field>
+          </div>
+        )}
+
+        {action.type === "media" && (
+          <div className="mt-3">
+            <Field label="Media key">
+              <Select
+                value={action.key}
+                onChange={(event) =>
+                  setAction({
+                    ...action,
+                    key: event.target.value,
+                  })
+                }
+              >
+                {MEDIA_KEYS.map((entry) => (
+                  <option key={entry.value} value={entry.value}>
+                    {entry.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        )}
+
+        {action.type === "window" && (
+          <div className="mt-3">
+            <Field label="Window action" hint="Applies to the window in front.">
+              <Segmented
+                value={action.action}
+                onChange={(windowAction) =>
+                  setAction({ ...action, action: windowAction })
+                }
+                options={WINDOW_ACTIONS}
+              />
+            </Field>
+          </div>
+        )}
+
+        {action.type === "toggleKeys" && (
+          <div className="mt-3">
+            <KeySelector
+              mode="combo"
+              keys={action.keys}
+              onChange={(keys) => setAction({ ...action, keys })}
+              onRecord={() => {
+                setLiveModifiers([]);
+                setCaptureTarget("keys");
+              }}
+              recording={captureTarget === "keys"}
+            />
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              The first press holds the keys down, the next press releases
+              them. The panic hotkey releases everything.
+            </p>
+          </div>
+        )}
+
+        {action.type === "dragLock" && (
+          <div className="mt-3">
+            <Field label="Button to hold">
+              <Segmented
+                value={action.button}
+                onChange={(mouseButton) =>
+                  setAction({ ...action, button: mouseButton })
+                }
+                options={MOUSE_BUTTONS.map((candidate) => ({
+                  value: candidate,
+                  label: buttonLabel(candidate),
+                }))}
+              />
+            </Field>
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              Press once to keep the button held (handy for dragging), press
+              again to release it.
+            </p>
+          </div>
+        )}
+
+        {action.type === "disable" && (
+          <Callout tone="warning" className="mt-3">
+            The button will be consumed and do nothing at all. Use “No action”
+            for a mapping that is configured but intentionally silent.
+          </Callout>
+        )}
+      </StepSection>
+    </>
+  );
+}
+
 export function MappingSheet({
   open,
   profileId,
@@ -269,15 +680,6 @@ export function MappingSheet({
       }
     },
   );
-
-  const needsKeys =
-    action.type === "shortcut" || action.type === "holdKeys" || action.type === "key";
-  const recordedKeys =
-    action.type === "shortcut" || action.type === "holdKeys"
-      ? action.keys
-      : action.type === "key" && action.key
-        ? [action.key]
-        : [];
 
   const secondButton = useMemo(() => {
     return MOUSE_BUTTONS.find((candidate) => candidate !== button) ?? "left";
@@ -645,380 +1047,15 @@ export function MappingSheet({
           )}
         </StepSection>
 
-        <StepSection
-          index="3"
-          title="Action"
-          hint="What should happen when the trigger is detected?"
-        >
-          <Field label="Action type">
-            <Select
-              value={action.type}
-              onChange={(event) =>
-                setAction(defaultAction(event.target.value as Action["type"]))
-              }
-            >
-              {ACTION_TYPES.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-
-          {needsKeys && (
-            <div className="mt-3">
-              <KeySelector
-                mode={action.type === "key" ? "single" : "combo"}
-                keys={recordedKeys}
-                onChange={(keys) => {
-                  if (action.type === "key") {
-                    setAction({ type: "key", key: keys[0] ?? "" });
-                  } else if (action.type === "shortcut" || action.type === "holdKeys") {
-                    setAction({ ...action, keys });
-                  }
-                }}
-                onRecord={() => {
-                  setLiveModifiers([]);
-                  setCaptureTarget("keys");
-                }}
-                recording={captureTarget === "keys"}
-              />
-              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-                {action.type === "holdKeys"
-                  ? "Keys stay held until the trigger button is released. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."
-                  : "Keys are pressed and released together. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."}
-              </p>
-            </div>
-          )}
-
-          {(action.type === "mouseClick" || action.type === "mouseHold") && (
-            <div className="mt-3">
-              <Field label="Mouse button">
-                <Segmented
-                  value={action.button}
-                  onChange={(mouseButton) =>
-                    setAction({ ...action, button: mouseButton })
-                  }
-                  options={MOUSE_BUTTONS.map((candidate) => ({
-                    value: candidate,
-                    label: buttonLabel(candidate),
-                  }))}
-                />
-              </Field>
-            </div>
-          )}
-
-          {action.type === "scroll" && (
-            <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_120px]">
-              <Field label="Direction">
-                <Segmented
-                  value={action.direction}
-                  onChange={(direction) =>
-                    setAction({ ...action, direction })
-                  }
-                  options={(
-                    ["up", "down", "left", "right"] as ScrollDirection[]
-                  ).map((direction) => ({
-                    value: direction,
-                    label: direction.charAt(0).toUpperCase() + direction.slice(1),
-                  }))}
-                />
-              </Field>
-              <Field label="Amount" hint="1–50 notches">
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={action.amount}
-                  onChange={(event) =>
-                    setAction({
-                      ...action,
-                      amount: Math.max(
-                        1,
-                        Math.min(50, Number(event.target.value) || 1),
-                      ),
-                    })
-                  }
-                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
-                />
-              </Field>
-            </div>
-          )}
-
-          {action.type === "macro" && (
-            <div className="mt-3 space-y-3">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Repeat" hint="1–100 times">
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={action.repeat}
-                    onChange={(event) =>
-                      setAction({
-                        ...action,
-                        repeat: Math.max(
-                          1,
-                          Math.min(100, Number(event.target.value) || 1),
-                        ),
-                      })
-                    }
-                    className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
-                  />
-                </Field>
-                <Field label="Interval" hint="ms between repeats">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10000}
-                    value={action.intervalMs}
-                    onChange={(event) =>
-                      setAction({
-                        ...action,
-                        intervalMs: Math.max(
-                          0,
-                          Math.min(10000, Number(event.target.value) || 0),
-                        ),
-                      })
-                    }
-                    className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
-                  />
-                </Field>
-                <div className="flex items-end">
-                  <div className="flex h-9 w-full items-center justify-between rounded-[9px] border border-zinc-200 px-3 dark:border-white/10">
-                    <span className="text-[12px]">Toggle</span>
-                    <Switch
-                      size="sm"
-                      checked={action.toggle}
-                      onChange={(toggle) => setAction({ ...action, toggle })}
-                      label="Press again to stop the macro"
-                    />
-                  </div>
-                </div>
-              </div>
-              {action.toggle && (
-                <p className="text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-                  Pressing the same button again stops the macro and releases
-                  everything it holds. The panic hotkey always stops it too.
-                </p>
-              )}
-
-              <div>
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-[12px] font-medium">
-                    Steps · {action.steps.length}
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <select
-                      value={newStepType}
-                      onChange={(event) =>
-                        setNewStepType(event.target.value as MacroStepType)
-                      }
-                      className="focus-ring h-7 rounded-lg border border-zinc-200 bg-white px-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
-                    >
-                      {MACRO_STEP_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      icon={<Plus />}
-                      onClick={() =>
-                        setAction({
-                          ...action,
-                          steps: [...action.steps, newMacroStep(newStepType)],
-                        })
-                      }
-                    >
-                      Add step
-                    </Button>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  {action.steps.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-zinc-200 px-3 py-5 text-center text-[11.5px] text-zinc-400 dark:border-white/10">
-                      Add the first step above. Steps run in order, top to bottom.
-                    </div>
-                  ) : (
-                    action.steps.map((step, index) => (
-                      <MacroStepRow
-                        key={index}
-                        step={step}
-                        index={index}
-                        total={action.steps.length}
-                        onChange={(next) =>
-                          setAction({
-                            ...action,
-                            steps: action.steps.map((candidate, position) =>
-                              position === index ? next : candidate,
-                            ),
-                          })
-                        }
-                        onMove={(direction) => {
-                          const target = index + direction;
-                          if (target < 0 || target >= action.steps.length) return;
-                          const steps = [...action.steps];
-                          [steps[index], steps[target]] = [
-                            steps[target],
-                            steps[index],
-                          ];
-                          setAction({ ...action, steps });
-                        }}
-                        onDuplicate={() =>
-                          setAction({
-                            ...action,
-                            steps: [
-                              ...action.steps.slice(0, index + 1),
-                              { ...step },
-                              ...action.steps.slice(index + 1),
-                            ],
-                          })
-                        }
-                        onRemove={() =>
-                          setAction({
-                            ...action,
-                            steps: action.steps.filter(
-                              (_, position) => position !== index,
-                            ),
-                          })
-                        }
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {action.type === "launch" && (
-            <div className="mt-3">
-              <Field
-                label="Target"
-                hint="A program, file, folder or URL. Windows opens it with the default handler."
-              >
-                <input
-                  value={action.target}
-                  maxLength={1000}
-                  onChange={(event) =>
-                    setAction({ ...action, target: event.target.value })
-                  }
-                  placeholder="notepad.exe  ·  https://example.com  ·  C:\folder"
-                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 font-mono text-[12px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
-                />
-              </Field>
-              <Callout tone="warning" className="mt-3">
-                Launch actions run with your user account. Profiles imported from
-                elsewhere ask for confirmation before any target is saved.
-              </Callout>
-            </div>
-          )}
-
-          {action.type === "typeText" && (
-            <div className="mt-3">
-              <Field
-                label="Text"
-                hint="Typed as Unicode, so non-Latin characters work. Add a wait or click step first if focus may change."
-              >
-                <textarea
-                  value={action.text}
-                  maxLength={2000}
-                  rows={3}
-                  onChange={(event) =>
-                    setAction({ ...action, text: event.target.value })
-                  }
-                  placeholder="Text to type into the focused window"
-                  className="focus-ring w-full resize-y rounded-[9px] border border-zinc-200 bg-white px-3 py-2 text-[12.5px] placeholder:text-zinc-400 dark:border-white/10 dark:bg-white/[0.04] dark:placeholder:text-zinc-600"
-                />
-              </Field>
-            </div>
-          )}
-
-          {action.type === "media" && (
-            <div className="mt-3">
-              <Field label="Media key">
-                <Select
-                  value={action.key}
-                  onChange={(event) =>
-                    setAction({
-                      ...action,
-                      key: event.target.value,
-                    })
-                  }
-                >
-                  {MEDIA_KEYS.map((entry) => (
-                    <option key={entry.value} value={entry.value}>
-                      {entry.label}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-          )}
-
-          {action.type === "window" && (
-            <div className="mt-3">
-              <Field label="Window action" hint="Applies to the window in front.">
-                <Segmented
-                  value={action.action}
-                  onChange={(windowAction) =>
-                    setAction({ ...action, action: windowAction })
-                  }
-                  options={WINDOW_ACTIONS}
-                />
-              </Field>
-            </div>
-          )}
-
-          {action.type === "toggleKeys" && (
-            <div className="mt-3">
-              <KeySelector
-                mode="combo"
-                keys={action.keys}
-                onChange={(keys) => setAction({ ...action, keys })}
-                onRecord={() => {
-                  setLiveModifiers([]);
-                  setCaptureTarget("keys");
-                }}
-                recording={captureTarget === "keys"}
-              />
-              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-                The first press holds the keys down, the next press releases
-                them. The panic hotkey releases everything.
-              </p>
-            </div>
-          )}
-
-          {action.type === "dragLock" && (
-            <div className="mt-3">
-              <Field label="Button to hold">
-                <Segmented
-                  value={action.button}
-                  onChange={(mouseButton) =>
-                    setAction({ ...action, button: mouseButton })
-                  }
-                  options={MOUSE_BUTTONS.map((candidate) => ({
-                    value: candidate,
-                    label: buttonLabel(candidate),
-                  }))}
-                />
-              </Field>
-              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-                Press once to keep the button held (handy for dragging), press
-                again to release it.
-              </p>
-            </div>
-          )}
-
-          {action.type === "disable" && (
-            <Callout tone="warning" className="mt-3">
-              The button will be consumed and do nothing at all. Use “No action”
-              for a mapping that is configured but intentionally silent.
-            </Callout>
-          )}
-        </StepSection>
+        <ActionFields
+          action={action}
+          setAction={setAction}
+          captureTarget={captureTarget}
+          setCaptureTarget={setCaptureTarget}
+          setLiveModifiers={setLiveModifiers}
+          newStepType={newStepType}
+          setNewStepType={setNewStepType}
+        />
 
         <StepSection
           index="4"

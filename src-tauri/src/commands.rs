@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tauri::State;
 
-use crate::config::model::{Action, ExceptionRule, Layer, Mapping, Settings};
+use crate::config::model::{Action, ExceptionRule, KeyMapping, Layer, Mapping, Settings};
 use crate::platform::elevation;
 use crate::platform::hooks::{self, InputSample};
 use crate::platform::service::CaptureMode;
@@ -113,8 +113,35 @@ pub fn set_mapping_enabled(
 }
 
 #[tauri::command]
-pub fn duplicate_mapping(
+pub fn save_key_mapping(
     state: State<'_, AppState>,
+    profile_id: String,
+    mapping: KeyMapping,
+) -> Result<Snapshot, String> {
+    state.save_key_mapping(&profile_id, mapping)
+}
+
+#[tauri::command]
+pub fn delete_key_mapping(
+    state: State<'_, AppState>,
+    profile_id: String,
+    mapping_id: String,
+) -> Result<Snapshot, String> {
+    state.delete_key_mapping(&profile_id, &mapping_id)
+}
+
+#[tauri::command]
+pub fn set_key_mapping_enabled(
+    state: State<'_, AppState>,
+    profile_id: String,
+    mapping_id: String,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    state.set_key_mapping_enabled(&profile_id, &mapping_id, enabled)
+}
+
+#[tauri::command]
+pub fn duplicate_mapping(    state: State<'_, AppState>,
     profile_id: String,
     mapping_id: String,
 ) -> Result<Snapshot, String> {

@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   ChevronRight,
   Info,
+  Keyboard,
   Layers,
   Layers3,
   LayoutDashboard,
@@ -28,6 +29,7 @@ const NAV_ITEMS: Array<{
   { view: "layers", label: "Layers", icon: Layers3 },
   { view: "profiles", label: "Profiles", icon: Layers },
   { view: "exceptions", label: "Exceptions", icon: ShieldAlert },
+  { view: "keyboard", label: "Keyboard", icon: Keyboard },
   { view: "scroll", label: "Scroll", icon: MoveVertical },
   { view: "settings", label: "Settings", icon: Settings },
   { view: "about", label: "About", icon: Info },

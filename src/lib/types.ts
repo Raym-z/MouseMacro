@@ -93,6 +93,7 @@ export interface Profile {
   description: string;
   mappings: Mapping[];
   layers: Layer[];
+  keyMappings: KeyMapping[];
 }
 
 export type ExceptionMode = "always" | "disable" | "profile";
@@ -115,6 +116,8 @@ export interface ExceptionRule {
   enabled: boolean;
   /** Optional wheel override; null inherits the global setting. */
   scroll: ScrollSettings | null;
+  /** Pass keyboard input through untouched in this application. */
+  keyboardDisabled: boolean;
 }
 
 export type RuleCategory =
@@ -125,6 +128,26 @@ export type RuleCategory =
   | "singleClick";
 
 export type Theme = "system" | "light" | "dark";
+
+export interface KeyboardSettings {
+  /** Opt-in always-on keyboard hook. */
+  enabled: boolean;
+  /** The user has seen the hook explanation. */
+  acknowledged: boolean;
+}
+
+export type KeyBehaviour =
+  | { mode: "remap"; target: string[] }
+  | { mode: "action"; action: Action };
+
+export interface KeyMapping {
+  id: string;
+  name: string | null;
+  /** Canonical tokens, modifiers first, exactly one non-modifier key. */
+  source: string[];
+  behaviour: KeyBehaviour;
+  enabled: boolean;
+}
 
 export interface Settings {
   enabled: boolean;
@@ -142,6 +165,7 @@ export interface Settings {
   /** False on a fresh install; the guided setup sets it to true. */
   onboarded: boolean;
   scroll: ScrollSettings;
+  keyboard: KeyboardSettings;
 }
 
 export interface InputSample {
@@ -226,6 +250,7 @@ export type View =
   | "layers"
   | "profiles"
   | "exceptions"
+  | "keyboard"
   | "scroll"
   | "settings"
   | "about";
@@ -288,6 +313,16 @@ export function newMacroStep(type: MacroStepType): MacroStep {
 
 export const DEFAULT_ACTION: Action = { type: "shortcut", keys: [] };
 
+export function newKeyMapping(): KeyMapping {
+  return {
+    id: "",
+    name: null,
+    source: [],
+    behaviour: { mode: "remap", target: [] },
+    enabled: true,
+  };
+}
+
 export function newLayer(activator: MouseButton = "x2"): Layer {
   return {
     id: "",
@@ -298,8 +333,7 @@ export function newLayer(activator: MouseButton = "x2"): Layer {
   };
 }
 
-export function newMapping(button: MouseButton | null = "x2"): Mapping {
-  return {
+export function newMapping(button: MouseButton | null = "x2"): Mapping {  return {
     id: "",
     name: null,
     button,

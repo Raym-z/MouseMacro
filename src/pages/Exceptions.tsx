@@ -36,6 +36,7 @@ function emptyRule(): ExceptionRule {
     profileId: null,
     enabled: true,
     scroll: null,
+    keyboardDisabled: false,
   };
 }
 
@@ -468,6 +469,28 @@ export function ExceptionsPage() {
               </span>
             </Callout>
           )}
+
+          <div className="rounded-xl border border-zinc-200/80 px-3 py-2.5 dark:border-white/[0.07]">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[12.5px] font-medium">
+                  Keyboard remapping off
+                </div>
+                <div className="text-[11px] leading-relaxed text-secondary">
+                  {draft.mode === "disable"
+                    ? "Mappings off already passes every key through."
+                    : "Keys pass through untouched in this app. Mouse mappings still apply."}
+                </div>
+              </div>
+              <Switch
+                checked={draft.keyboardDisabled}
+                onChange={(keyboardDisabled) =>
+                  setDraft({ ...draft, keyboardDisabled })
+                }
+                label="Disable keyboard remapping in this app"
+              />
+            </div>
+          </div>
 
           <div className="flex items-center justify-between rounded-xl border border-zinc-200/80 px-3 py-2.5 dark:border-white/[0.07]">
             <div>

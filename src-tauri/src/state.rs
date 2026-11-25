@@ -5,11 +5,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::model::{
-    is_media_key, Action, AppConfig, ExceptionMode, ExceptionRule, Layer, MacroStep, Mapping,
-    Profile, Settings, Theme, Trigger, WheelOptions,
+    is_media_key, Action, AppConfig, ExceptionMode, ExceptionRule, KeyBehaviour, KeyMapping, Layer,
+    MacroStep, Mapping, Profile, Settings, Theme, Trigger, WheelOptions,
 };
 use crate::config::store::ConfigStore;
-use crate::engine::keys::{normalize_combo, vk_from_name};
+use crate::engine::keys::{is_modifier_name, normalize_combo, vk_from_name};
 use crate::platform::elevation;
 use crate::platform::hotkey;
 use crate::platform::service::{CaptureMode, EngineService};
@@ -303,8 +303,7 @@ impl AppState {
         &self,
         profile_id: &str,
         mut mapping: Mapping,
-    ) -> Result<Snapshot, String> {
-        validate_mapping(&mut mapping)?;
+    ) -> Result<Snapshot, String> {        validate_mapping(&mut mapping)?;
         let mut config = self.cfg();
         let profile = config
             .profiles
@@ -365,6 +364,83 @@ impl AppState {
             .iter_mut()
             .find(|m| m.id == mapping_id)
             .ok_or_else(|| "That mapping no longer exists.".to_string())?;
+        mapping.enabled = enabled;
+        self.commit(config, false)
+    }
+
+    pub fn save_key_mapping(
+        &self,
+        profile_id: &str,
+        mut mapping: KeyMapping,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        validate_key_mapping(&mut mapping, &config.settings.panic_hotkey)?;
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        if mapping.id.trim().is_empty() {
+            mapping.id = uuid::Uuid::new_v4().to_string();
+        }
+        if profile
+            .key_mappings
+            .iter()
+            .any(|existing| existing.id != mapping.id && existing.source == mapping.source)
+        {
+            return Err("Another keyboard mapping already uses this combination.".into());
+        }
+        if let Some(existing) = profile
+            .key_mappings
+            .iter_mut()
+            .find(|existing| existing.id == mapping.id)
+        {
+            *existing = mapping;
+        } else {
+            if profile.key_mappings.len() >= 200 {
+                return Err("This profile already has 200 keyboard mappings.".into());
+            }
+            profile.key_mappings.push(mapping);
+        }
+        self.commit(config, false)
+    }
+
+    pub fn delete_key_mapping(
+        &self,
+        profile_id: &str,
+        mapping_id: &str,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let before = profile.key_mappings.len();
+        profile.key_mappings.retain(|m| m.id != mapping_id);
+        if profile.key_mappings.len() == before {
+            return Err("That keyboard mapping no longer exists.".into());
+        }
+        self.commit(config, false)
+    }
+
+    pub fn set_key_mapping_enabled(
+        &self,
+        profile_id: &str,
+        mapping_id: &str,
+        enabled: bool,
+    ) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| "That profile no longer exists.".to_string())?;
+        let mapping = profile
+            .key_mappings
+            .iter_mut()
+            .find(|m| m.id == mapping_id)
+            .ok_or_else(|| "That keyboard mapping no longer exists.".to_string())?;
         mapping.enabled = enabled;
         self.commit(config, false)
     }
@@ -890,6 +966,72 @@ pub fn validate_mapping(mapping: &mut Mapping) -> Result<(), String> {
     validate_action(&mut mapping.action)
 }
 
+/// Validates a keyboard mapping and normalizes its key tokens in place.
+pub fn validate_key_mapping(
+    mapping: &mut KeyMapping,
+    panic_hotkey: &[String],
+) -> Result<(), String> {
+    mapping.name = mapping
+        .name
+        .as_ref()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    if mapping
+        .name
+        .as_ref()
+        .is_some_and(|name| name.chars().count() > 60)
+    {
+        return Err("Mapping labels can be at most 60 characters.".into());
+    }
+
+    mapping.source = normalize_combo(&mapping.source);
+    if mapping.source.len() > 4 {
+        return Err("A keyboard source can contain at most 4 keys.".into());
+    }
+    let non_modifiers: Vec<&String> = mapping
+        .source
+        .iter()
+        .filter(|key| !is_modifier_name(key))
+        .collect();
+    if non_modifiers.len() != 1 {
+        return Err(
+            "Choose one key plus optional modifiers; a bare modifier cannot be a source.".into(),
+        );
+    }
+    if let Some(unknown) = mapping
+        .source
+        .iter()
+        .find(|key| vk_from_name(key).is_none())
+    {
+        return Err(format!("“{unknown}” is not a supported key."));
+    }
+
+    let panic = normalize_combo(panic_hotkey);
+    if !panic.is_empty() && mapping.source == panic {
+        return Err(
+            "That is the emergency stop combination, which always takes priority. Choose another."
+                .into(),
+        );
+    }
+
+    match &mut mapping.behaviour {
+        KeyBehaviour::Remap { target } => {
+            *target = normalize_combo(target);
+            if target.is_empty() {
+                return Err("Choose at least one target key.".into());
+            }
+            if target.len() > 8 {
+                return Err("A remap target can contain at most 8 keys.".into());
+            }
+            if let Some(unknown) = target.iter().find(|key| vk_from_name(key).is_none()) {
+                return Err(format!("“{unknown}” is not a supported target key."));
+            }
+        }
+        KeyBehaviour::Action { action } => validate_action(action)?,
+    }
+    Ok(())
+}
+
 /// Validates and normalizes an action without needing a full mapping. Used by
 /// the editor's Test button.
 pub fn validate_action(action: &mut Action) -> Result<(), String> {
@@ -1070,6 +1212,58 @@ fn validate_layer(layer: &mut Layer) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::config::model::MacroStep;
+
+    #[test]
+    fn key_mapping_validation_rejects_what_the_matcher_cannot_use() {
+        let panic = vec![
+            "ctrl".to_string(),
+            "alt".to_string(),
+            "shift".to_string(),
+            "f12".to_string(),
+        ];
+
+        let mut good = KeyMapping::new(
+            vec!["Shift".into(), "F12".into()],
+            KeyBehaviour::Action {
+                action: Action::Shortcut {
+                    keys: vec!["a".into()],
+                },
+            },
+        );
+        assert!(validate_key_mapping(&mut good, &panic).is_ok());
+        assert_eq!(good.source, vec!["shift", "f12"]);
+
+        let mut panic_source = KeyMapping::new(
+            vec!["f12".into(), "ctrl".into(), "alt".into(), "shift".into()],
+            KeyBehaviour::Remap {
+                target: vec!["a".into()],
+            },
+        );
+        let error = validate_key_mapping(&mut panic_source, &panic).unwrap_err();
+        assert!(error.contains("emergency stop"), "{error}");
+
+        let mut bare_modifier = KeyMapping::new(
+            vec!["ctrl".into()],
+            KeyBehaviour::Remap {
+                target: vec!["a".into()],
+            },
+        );
+        assert!(validate_key_mapping(&mut bare_modifier, &panic).is_err());
+
+        let mut unknown = KeyMapping::new(
+            vec!["ctrl".into(), "nope".into()],
+            KeyBehaviour::Remap {
+                target: vec!["a".into()],
+            },
+        );
+        assert!(validate_key_mapping(&mut unknown, &panic).is_err());
+
+        let mut empty_target = KeyMapping::new(
+            vec!["f12".into()],
+            KeyBehaviour::Remap { target: vec![] },
+        );
+        assert!(validate_key_mapping(&mut empty_target, &panic).is_err());
+    }
 
     #[test]
     fn macro_validation_rejects_empty_and_overlong_sequences() {

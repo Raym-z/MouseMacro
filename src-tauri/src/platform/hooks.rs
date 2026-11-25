@@ -9,6 +9,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use serde::Serialize;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
@@ -238,10 +239,20 @@ pub fn enable_keyboard_hook() -> Result<(), String> {
             };
 
             KEY_HOOK_HANDLE.store(hook.0 as i64, Ordering::SeqCst);
-            KEYBOARD_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
-            let _ = tx.send(Ok(()));
+            let thread_id = GetCurrentThreadId();
+            KEYBOARD_THREAD_ID.store(thread_id, Ordering::SeqCst);
 
+            // Only report success once the loop is dispatching. Low-level hooks
+            // time out if the installing thread is not pumping, so events in
+            // that window would reach the app unhooked.
+            let _ = PostThreadMessageW(thread_id, 0x8000 + 1, WPARAM(0), LPARAM(0));
+
+            let mut ready = false;
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if !ready {
+                    ready = true;
+                    let _ = tx.send(Ok(()));
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -266,8 +277,29 @@ pub fn enable_keyboard_hook() -> Result<(), String> {
     }
 }
 
-pub fn stop() {
-    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
+/// Removes the keyboard hook when remapping is turned off. Capture mode owns
+/// the same thread, so callers must check that it is idle first.
+pub fn disable_keyboard_hook() {
+    let thread_id = KEYBOARD_THREAD_ID.load(Ordering::SeqCst);
+    if thread_id == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostThreadMessageW(thread_id, 0x0012 /* WM_QUIT */, WPARAM(0), LPARAM(0));
+    }
+    // The hook thread clears its handle on the way out. Waiting briefly keeps
+    // an immediate re-enable from seeing a half-stopped hook.
+    for _ in 0..50 {
+        if KEY_HOOK_HANDLE.load(Ordering::SeqCst) == 0
+            && !KEYBOARD_THREAD_RUNNING.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+pub fn stop() {    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
     if thread_id != 0 {
         unsafe {
             let _ = PostThreadMessageW(thread_id, 0x0012 /* WM_QUIT */, WPARAM(0), LPARAM(0));
@@ -454,9 +486,6 @@ unsafe fn handle_keyboard_message(message: u32, lparam: LPARAM) -> bool {
     let Some(service) = SERVICE.get() else {
         return false;
     };
-    if service.capture_mode() != crate::platform::service::CaptureMode::Keyboard {
-        return false;
-    }
     let Some(info) = (lparam.0 as *const KBDLLHOOKSTRUCT).as_ref() else {
         return false;
     };

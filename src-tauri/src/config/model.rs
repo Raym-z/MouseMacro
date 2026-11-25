@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::engine::keys::{is_modifier_name, normalize_combo, vk_from_name};
+
 pub const SCHEMA_VERSION: u32 = 4;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
 
@@ -396,6 +398,67 @@ impl Mapping {
 /// A set of mappings that replaces the profile's mappings while
 /// [`Layer::activator`] is held. Mappings that the layer does not define fall
 /// back to the profile, so a layer can change just one or two buttons.
+/// Keyboard remapping settings. Remapping is off by default and requires an
+/// explicit acknowledgement before the always-on hook is installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KeyboardSettings {
+    pub enabled: bool,
+    /// The user has seen and accepted the hook explanation.
+    pub acknowledged: bool,
+}
+
+/// What a key mapping does when its source combination goes down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "mode",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum KeyBehaviour {
+    /// Press the target keys while the source is held, preserving hold
+    /// semantics. The matching release releases the targets.
+    Remap { target: Vec<String> },
+    /// Run an action once when the source goes down.
+    Action { action: Action },
+}
+
+/// A keyboard source combination mapped to a target or an action.
+///
+/// `source` is canonical tokens with modifiers first and exactly one
+/// non-modifier key. Bare modifiers cannot be sources.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyMapping {
+    pub id: String,
+    pub name: Option<String>,
+    pub source: Vec<String>,
+    pub behaviour: KeyBehaviour,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl KeyMapping {
+    #[allow(dead_code)]
+    pub fn new(source: Vec<String>, behaviour: KeyBehaviour) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: None,
+            source,
+            behaviour,
+            enabled: true,
+        }
+    }
+
+    /// The single non-modifier key that identifies this mapping.
+    pub fn source_key(&self) -> Option<&str> {
+        self.source
+            .iter()
+            .find(|key| !is_modifier_name(key))
+            .map(String::as_str)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layer {
@@ -451,6 +514,9 @@ pub struct ExceptionRule {
     /// global scroll settings.
     #[serde(default)]
     pub scroll: Option<ScrollSettings>,
+    /// Pass keyboard input through untouched in this application.
+    #[serde(default)]
+    pub keyboard_disabled: bool,
 }
 
 impl ExceptionRule {
@@ -463,6 +529,7 @@ impl ExceptionRule {
             profile_id: None,
             enabled: true,
             scroll: None,
+            keyboard_disabled: false,
         }
     }
 
@@ -551,6 +618,9 @@ pub struct Settings {
     /// rule overrides it.
     #[serde(default)]
     pub scroll: ScrollSettings,
+    /// Opt-in keyboard remapping.
+    #[serde(default)]
+    pub keyboard: KeyboardSettings,
 }
 
 fn default_panic_hotkey() -> Vec<String> {
@@ -575,6 +645,7 @@ impl Default for Settings {
             panic_hotkey: default_panic_hotkey(),
             onboarded: false,
             scroll: ScrollSettings::default(),
+            keyboard: KeyboardSettings::default(),
         }
     }
 }
@@ -627,6 +698,10 @@ pub struct Profile {
     /// Held-button layers, evaluated before `mappings` while active.
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// Keyboard source combinations. Only active while keyboard remapping is
+    /// enabled.
+    #[serde(default)]
+    pub key_mappings: Vec<KeyMapping>,
 }
 
 impl Profile {
@@ -637,6 +712,7 @@ impl Profile {
             description: String::new(),
             mappings: Vec::new(),
             layers: Vec::new(),
+            key_mappings: Vec::new(),
         }
     }
 }
@@ -754,6 +830,9 @@ impl AppConfig {
         let mut notes = Vec::new();
         let migrating = self.schema_version < SCHEMA_VERSION;
         self.settings.sanitize();
+        // The emergency stop must always win, so key mappings that would
+        // shadow it are removed rather than silently ignored at runtime.
+        let panic = normalize_combo(&self.settings.panic_hotkey);
 
         if self.profiles.is_empty() {
             let mut profile = Profile::new("Default");
@@ -779,6 +858,7 @@ impl AppConfig {
 
             let owner = profile.name.clone();
             sanitize_mappings(&mut profile.mappings, &owner, "profile", &mut notes);
+            sanitize_key_mappings(&mut profile.key_mappings, &owner, &panic, &mut notes);
 
             let mut layer_ids = Vec::new();
             let mut activators = Vec::new();
@@ -906,82 +986,7 @@ fn sanitize_mappings(
             mapping.wheel = None;
         }
 
-        match &mut mapping.action {
-            Action::Shortcut { keys } | Action::HoldKeys { keys } => {
-                sanitize_key_list(keys, 8)
-            }
-            Action::Key { key } => {
-                *key = key.trim().to_lowercase();
-                !key.is_empty()
-            }
-            Action::Scroll { amount, .. } => {
-                *amount = (*amount).clamp(1, 50);
-                true
-            }
-            Action::Macro {
-                steps,
-                repeat,
-                interval_ms,
-                toggle: _,
-            } => {
-                steps.retain_mut(sanitize_step);
-                *repeat = (*repeat).clamp(1, 100);
-                *interval_ms = (*interval_ms).min(10_000);
-                steps.truncate(40);
-
-                // Honour the two-minute budget even for hand-edited or
-                // imported files: trim trailing steps and reduce the repeat
-                // count until one full run plus its intervals fits.
-                const BUDGET_MS: u64 = 120_000;
-                let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
-                if step_total > BUDGET_MS {
-                    let mut running = 0u64;
-                    steps.retain(|step| {
-                        if running.saturating_add(step.delay_ms()) > BUDGET_MS {
-                            return false;
-                        }
-                        running = running.saturating_add(step.delay_ms());
-                        true
-                    });
-                }
-                let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
-                while *repeat > 1 {
-                    let rounds = *repeat as u64;
-                    let total = step_total
-                        .saturating_mul(rounds)
-                        .saturating_add(interval_ms.saturating_mul(rounds.saturating_sub(1)));
-                    if total <= BUDGET_MS {
-                        break;
-                    }
-                    *repeat -= 1;
-                }
-                !steps.is_empty()
-            }
-            Action::Launch { target } => {
-                *target = target.trim().chars().take(1_000).collect();
-                !target.is_empty()
-            }
-            Action::TypeText { text } => {
-                *text = text.chars().take(2_000).collect();
-                !text.is_empty()
-            }
-            Action::Media { key } => {
-                let lower = key.trim().to_lowercase();
-                if is_media_key(&lower) {
-                    *key = lower;
-                    true
-                } else {
-                    false
-                }
-            }
-            Action::ToggleKeys { keys } => sanitize_key_list(keys, 4),
-            Action::Window { .. }
-            | Action::DragLock { .. }
-            | Action::MouseClick { .. }
-            | Action::MouseHold { .. }
-            | Action::Disable
-            | Action::None => true,
-        }
+        sanitize_action(&mut mapping.action)
     });
     if mappings.len() != before {
         notes.push(format!(
@@ -990,6 +995,145 @@ fn sanitize_mappings(
         ));
     }
     mappings.truncate(500);
+}
+
+/// Repairs an action in place. Returns false when nothing usable remains, so
+/// the caller can drop the mapping or key mapping that owns it.
+fn sanitize_action(action: &mut Action) -> bool {
+    match action {
+        Action::Shortcut { keys } | Action::HoldKeys { keys } => {
+            sanitize_key_list(keys, 8)
+        }
+        Action::Key { key } => {
+            *key = key.trim().to_lowercase();
+            !key.is_empty()
+        }
+        Action::Scroll { amount, .. } => {
+            *amount = (*amount).clamp(1, 50);
+            true
+        }
+        Action::Macro {
+            steps,
+            repeat,
+            interval_ms,
+            toggle: _,
+        } => {
+            steps.retain_mut(sanitize_step);
+            *repeat = (*repeat).clamp(1, 100);
+            *interval_ms = (*interval_ms).min(10_000);
+            steps.truncate(40);
+
+            // Honour the two-minute budget even for hand-edited or
+            // imported files: trim trailing steps and reduce the repeat
+            // count until one full run plus its intervals fits.
+            const BUDGET_MS: u64 = 120_000;
+            let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
+            if step_total > BUDGET_MS {
+                let mut running = 0u64;
+                steps.retain(|step| {
+                    if running.saturating_add(step.delay_ms()) > BUDGET_MS {
+                        return false;
+                    }
+                    running = running.saturating_add(step.delay_ms());
+                    true
+                });
+            }
+            let step_total: u64 = steps.iter().map(MacroStep::delay_ms).sum();
+            while *repeat > 1 {
+                let rounds = *repeat as u64;
+                let total = step_total
+                    .saturating_mul(rounds)
+                    .saturating_add(interval_ms.saturating_mul(rounds.saturating_sub(1)));
+                if total <= BUDGET_MS {
+                    break;
+                }
+                *repeat -= 1;
+            }
+            !steps.is_empty()
+        }
+        Action::Launch { target } => {
+            *target = target.trim().chars().take(1_000).collect();
+            !target.is_empty()
+        }
+        Action::TypeText { text } => {
+            *text = text.chars().take(2_000).collect();
+            !text.is_empty()
+        }
+        Action::Media { key } => {
+            let lower = key.trim().to_lowercase();
+            if is_media_key(&lower) {
+                *key = lower;
+                true
+            } else {
+                false
+            }
+        }
+        Action::ToggleKeys { keys } => sanitize_key_list(keys, 4),
+        Action::Window { .. }
+        | Action::DragLock { .. }
+        | Action::MouseClick { .. }
+        | Action::MouseHold { .. }
+        | Action::Disable
+        | Action::None => true,
+    }
+}
+
+/// Repairs a profile's key mappings, dropping anything that could never match.
+fn sanitize_key_mappings(
+    mappings: &mut Vec<KeyMapping>,
+    owner: &str,
+    panic: &[String],
+    notes: &mut Vec<String>,
+) {
+    let before = mappings.len();
+    let mut ids: Vec<String> = Vec::new();
+    let mut sources: Vec<Vec<String>> = Vec::new();
+    mappings.retain_mut(|mapping| {
+        mapping.name = mapping
+            .name
+            .as_ref()
+            .map(|name| name.trim().chars().take(60).collect::<String>())
+            .filter(|name| !name.is_empty());
+        if mapping.id.trim().is_empty() || ids.contains(&mapping.id) {
+            mapping.id = Uuid::new_v4().to_string();
+        }
+        ids.push(mapping.id.clone());
+
+        mapping.source = normalize_combo(&mapping.source);
+        if mapping.source.len() > 4 {
+            return false;
+        }
+        if mapping.source.iter().any(|key| vk_from_name(key).is_none()) {
+            return false;
+        }
+        let non_modifiers = mapping
+            .source
+            .iter()
+            .filter(|key| !is_modifier_name(key))
+            .count();
+        if non_modifiers != 1 || mapping.source.is_empty() {
+            return false;
+        }
+        if !panic.is_empty() && mapping.source == panic {
+            return false;
+        }
+        if sources.contains(&mapping.source) {
+            return false;
+        }
+        sources.push(mapping.source.clone());
+
+        match &mut mapping.behaviour {
+            KeyBehaviour::Remap { target } => sanitize_key_list(target, 8),
+            KeyBehaviour::Action { action } => sanitize_action(action),
+        }
+    });
+    mappings.truncate(200);
+    if mappings.len() != before {
+        notes.push(format!(
+            "Removed {} keyboard mapping(s) that could not match in “{owner}”.",
+            before - mappings.len()
+        ));
+    }
 }
 
 /// Lowercases, trims and de-duplicates a key list. Returns false when nothing
@@ -1090,6 +1234,77 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(config.schema_version, SCHEMA_VERSION);
         assert!(config.settings.onboarded);
+        assert!(!config.settings.keyboard.enabled);
+        assert!(!config.settings.keyboard.acknowledged);
+        assert!(config.profiles.iter().all(|p| p.key_mappings.is_empty()));
+    }
+
+    #[test]
+    fn keyboard_mappings_round_trip_and_sanitize_drops_unmatchable_sources() {
+        let mut config = AppConfig::default();
+        let profile = config.active_profile_mut().unwrap();
+        profile.key_mappings = vec![
+            KeyMapping::new(
+                vec!["CapsLock".into()],
+                KeyBehaviour::Remap {
+                    target: vec!["ctrl".into()],
+                },
+            ),
+            // Bare modifier: can never be a source.
+            KeyMapping::new(
+                vec!["ctrl".into()],
+                KeyBehaviour::Remap {
+                    target: vec!["alt".into()],
+                },
+            ),
+            // Two non-modifier keys: not a hotkey.
+            KeyMapping::new(
+                vec!["f12".into(), "f13".into()],
+                KeyBehaviour::Remap {
+                    target: vec!["a".into()],
+                },
+            ),
+            // The emergency stop must always win.
+            KeyMapping::new(
+                vec![
+                    "ctrl".into(),
+                    "alt".into(),
+                    "shift".into(),
+                    "f12".into(),
+                ],
+                KeyBehaviour::Action {
+                    action: Action::None,
+                },
+            ),
+            KeyMapping::new(
+                vec!["f12".into()],
+                KeyBehaviour::Remap {
+                    target: vec!["a".into()],
+                },
+            ),
+            // Duplicate source: the first mapping wins.
+            KeyMapping::new(
+                vec!["f12".into()],
+                KeyBehaviour::Remap {
+                    target: vec!["b".into()],
+                },
+            ),
+        ];
+
+        let notes = config.sanitize();
+        assert!(!notes.is_empty());
+        let keys = &config.active_profile().unwrap().key_mappings;
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].source, vec!["capslock"]);
+        assert_eq!(keys[1].source, vec!["f12"]);
+        assert!(keys.iter().all(|mapping| mapping.enabled));
+
+        let json = serde_json::to_string(&keys[0]).unwrap();
+        assert!(json.contains("\"mode\":\"remap\""), "{json}");
+        assert!(json.contains("\"target\":[\"ctrl\"]"), "{json}");
+
+        let action = serde_json::to_string(&keys[1]).unwrap();
+        assert!(!action.contains("action"));
     }
 
     #[test]

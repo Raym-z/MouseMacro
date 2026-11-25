@@ -5,6 +5,7 @@ import type {
   CaptureMode,
   ExceptionRule,
   InputSample,
+  KeyMapping,
   Layer,
   Mapping,
   MappingActivity,
@@ -48,6 +49,20 @@ export const api = {
     }),
   duplicateMapping: (profileId: string, mappingId: string) =>
     invoke<Snapshot>("duplicate_mapping", { profileId, mappingId }),
+  saveKeyMapping: (profileId: string, mapping: KeyMapping) =>
+    invoke<Snapshot>("save_key_mapping", { profileId, mapping }),
+  deleteKeyMapping: (profileId: string, mappingId: string) =>
+    invoke<Snapshot>("delete_key_mapping", { profileId, mappingId }),
+  setKeyMappingEnabled: (
+    profileId: string,
+    mappingId: string,
+    enabled: boolean,
+  ) =>
+    invoke<Snapshot>("set_key_mapping_enabled", {
+      profileId,
+      mappingId,
+      enabled,
+    }),
   setMappingsEnabled: (
     profileId: string,
     mappingIds: string[],

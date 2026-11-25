@@ -14,10 +14,12 @@
 //! 4. If nothing matched, the swallowed physical events are replayed so the
 //!    default behaviour is preserved rather than silently lost.
 
+pub mod keyboard;
 pub mod keys;
 
 use crate::config::model::{
-    Action, Layer, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger, WheelOptions,
+    Action, KeyMapping, Layer, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger,
+    WheelOptions,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -90,6 +92,9 @@ impl Outcome {
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub enabled: bool,
+    /// Keyboard remapping is active (opt-in and not blocked by panic or an
+    /// application rule). Independent of `enabled` only for the hook lifetime.
+    pub keyboard: bool,
     pub long_press_ms: u64,
     pub double_click_ms: u64,
     pub priority: Vec<RuleCategory>,
@@ -97,17 +102,21 @@ pub struct EngineConfig {
     /// Layers of the active profile. An enabled layer applies while its
     /// activator button is physically held.
     pub layers: Vec<Layer>,
+    /// Keyboard mappings of the active profile.
+    pub key_mappings: Vec<KeyMapping>,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            keyboard: false,
             long_press_ms: 400,
             double_click_ms: 280,
             priority: RuleCategory::all(),
             mappings: Vec::new(),
             layers: Vec::new(),
+            key_mappings: Vec::new(),
         }
     }
 }
@@ -117,6 +126,7 @@ impl EngineConfig {
         let settings = &config.settings;
         Self {
             enabled: settings.enabled,
+            keyboard: settings.keyboard.enabled && settings.keyboard.acknowledged,
             long_press_ms: settings.long_press_ms,
             double_click_ms: settings.double_click_ms,
             priority: settings.rule_priority.clone(),
@@ -127,6 +137,10 @@ impl EngineConfig {
             layers: config
                 .active_profile()
                 .map(|profile| profile.layers.clone())
+                .unwrap_or_default(),
+            key_mappings: config
+                .active_profile()
+                .map(|profile| profile.key_mappings.clone())
                 .unwrap_or_default(),
         }
     }
@@ -892,6 +906,7 @@ mod tests {
             priority: RuleCategory::all(),
             mappings,
             layers: Vec::new(),
+            ..EngineConfig::default()
         })
     }
 
@@ -910,6 +925,7 @@ mod tests {
             priority: RuleCategory::all(),
             mappings,
             layers,
+            ..EngineConfig::default()
         })
     }
 
@@ -1329,6 +1345,7 @@ mod tests {
             ],
             mappings: engine.config.mappings.clone(),
             layers: engine.config.layers.clone(),
+            ..EngineConfig::default()
         });
         down(&mut engine, MouseButton::X2, 1_000);
         let release = up(&mut engine, MouseButton::X2, 1_100);
@@ -1397,6 +1414,7 @@ mod tests {
             ],
             mappings: engine.config.mappings.clone(),
             layers: engine.config.layers.clone(),
+            ..EngineConfig::default()
         });
         down(&mut engine, MouseButton::X2, 1_000);
         let release = up(&mut engine, MouseButton::X2, 1_100);

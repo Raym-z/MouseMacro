@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 use crate::config::model::{
     Action, AppConfig, ExceptionMode, MacroStep, MouseButton, ScrollDirection, ScrollSettings,
 };
+use crate::engine::keyboard::KeyboardEngine;
 use crate::engine::{keys, Effect, EngineConfig, InputEngine, InputEvent};
 use crate::platform::simulate;
 
@@ -418,6 +419,7 @@ fn sleep_cancellable(cancel: &AtomicBool, ms: u64) -> bool {
 
 struct Inner {
     engine: InputEngine,
+    keyboard: KeyboardEngine,
 }
 
 /// Per-application state that is not persisted. `panic` is the emergency stop;
@@ -428,6 +430,9 @@ struct RuntimeState {
     exception_mode: ExceptionMode,
     profile_override: Option<String>,
     panic: bool,
+    /// Keyboard remapping is off in this application, either explicitly or
+    /// because the rule disables all mappings.
+    keyboard_disabled: bool,
     /// Wheel transform in effect. `None` passes physical wheels through.
     scroll: Option<ScrollSettings>,
 }
@@ -456,15 +461,19 @@ pub struct EngineService {
 
 impl EngineService {
     pub fn new(app: AppHandle, config: &AppConfig) -> Arc<Self> {
+        let mut runtime = RuntimeState::default();
+        Self::resolve_runtime(config, &mut runtime);
+        let effective = Self::compute_effective(config, &runtime);
         let service = Arc::new(Self {
             inner: Mutex::new(Inner {
-                engine: InputEngine::new(EngineConfig::from_app(config)),
+                engine: InputEngine::new(effective.clone()),
+                keyboard: KeyboardEngine::new(effective.keyboard, &effective.key_mappings),
             }),
             cv: Condvar::new(),
             executor: Executor::default(),
             app,
             config: Mutex::new(config.clone()),
-            runtime: Mutex::new(RuntimeState::default()),
+            runtime: Mutex::new(runtime),
             activity: Mutex::new(HashMap::new()),
             capture: AtomicU8::new(CaptureMode::None as u8),
             accept_external_injection: AtomicBool::new(
@@ -474,10 +483,7 @@ impl EngineService {
             hook_warning: Mutex::new(None),
             last_wheel_ms: AtomicU64::new(0),
         });
-        {
-            let mut runtime = service.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            Self::resolve_runtime(config, &mut runtime);
-        }
+        service.sync_keyboard_hook();
         Self::spawn_timer(service.clone());
         service
     }
@@ -537,16 +543,24 @@ impl EngineService {
         let mut effective = EngineConfig::from_app(config);
         if runtime.panic || !effective.enabled {
             effective.enabled = false;
+            effective.keyboard = false;
             return effective;
+        }
+        if runtime.keyboard_disabled {
+            effective.keyboard = false;
         }
 
         match runtime.exception_mode {
-            ExceptionMode::Disable => effective.enabled = false,
+            ExceptionMode::Disable => {
+                effective.enabled = false;
+                effective.keyboard = false;
+            }
             ExceptionMode::Profile => {
                 if let Some(id) = runtime.profile_override.as_deref() {
                     if let Some(profile) = config.profiles.iter().find(|p| p.id == id) {
                         effective.mappings = profile.mappings.clone();
                         effective.layers = profile.layers.clone();
+                        effective.key_mappings = profile.key_mappings.clone();
                     }
                 }
             }
@@ -558,6 +572,7 @@ impl EngineService {
     fn resolve_runtime(config: &AppConfig, runtime: &mut RuntimeState) {
         runtime.exception_mode = ExceptionMode::Always;
         runtime.profile_override = None;
+        runtime.keyboard_disabled = false;
         runtime.scroll = Some(config.settings.scroll.clone());
 
         let Some(process) = runtime.foreground.as_deref() else {
@@ -568,6 +583,8 @@ impl EngineService {
             if rule.mode == ExceptionMode::Profile {
                 runtime.profile_override = rule.profile_id.clone();
             }
+            runtime.keyboard_disabled =
+                rule.keyboard_disabled || rule.mode == ExceptionMode::Disable;
             // An explicit wheel override always applies. With mappings off and
             // no override, the wheel is left completely alone.
             runtime.scroll = rule.scroll.clone().or_else(|| {
@@ -595,14 +612,37 @@ impl EngineService {
     }
 
     fn apply_effective(&self, effective: EngineConfig, notify: bool) {
+        let keyboard = effective.keyboard;
+        let key_mappings = effective.key_mappings.clone();
         let effects = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.engine.reconfigure(effective)
+            let mut effects = inner.engine.reconfigure(effective);
+            effects.extend(inner.keyboard.reconfigure(keyboard, &key_mappings));
+            effects
         };
         self.cv.notify_all();
         self.execute(effects);
+        self.sync_keyboard_hook();
         if notify {
             let _ = self.app.emit("state:changed", ());
+        }
+    }
+
+    /// Installs the keyboard hook while remapping is opted in, and removes it
+    /// when it is turned off. Capture mode keeps the hook on its own.
+    fn sync_keyboard_hook(&self) {
+        let install = {
+            let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            config.settings.keyboard.enabled && config.settings.keyboard.acknowledged
+        };
+        if install {
+            if let Err(error) = crate::platform::hooks::enable_keyboard_hook() {
+                self.set_hook_warning(Some(format!(
+                    "Keyboard remapping is unavailable: {error}"
+                )));
+            }
+        } else if self.capture_mode() != CaptureMode::Keyboard {
+            crate::platform::hooks::disable_keyboard_hook();
         }
     }
 
@@ -778,6 +818,10 @@ impl EngineService {
                 self.cv.notify_all();
                 return Err(message);
             }
+        } else {
+            // Leave an opted-in remapping hook installed, but remove the one
+            // that only existed for capture.
+            self.sync_keyboard_hook();
         }
         self.cv.notify_all();
         Ok(())
@@ -884,12 +928,17 @@ impl EngineService {
         (base + bonus).min(5)
     }
 
-    /// Entry point for the low-level keyboard hook. Keyboard hooks are only
-    /// installed while a shortcut is being captured.
+    /// Entry point for the low-level keyboard hook.
     pub fn handle_key(&self, vk: u16, is_down: bool) -> bool {
-        if self.capture_mode() != CaptureMode::Keyboard {
-            return false;
+        if self.capture_mode() == CaptureMode::Keyboard {
+            return self.capture_key(vk, is_down);
         }
+        self.handle_keyboard(vk, is_down)
+    }
+
+    /// Shortcut capture swallows every key except Escape so the combination can
+    /// be recorded without leaking into the focused app.
+    fn capture_key(&self, vk: u16, is_down: bool) -> bool {
         if !is_down {
             return true;
         }
@@ -920,6 +969,27 @@ impl EngineService {
             json!({ "kind": "keys", "keys": combo }),
         );
         true
+    }
+
+    /// Matches a physical key against the profile's keyboard mappings. Returns
+    /// true when the hook must swallow it.
+    fn handle_keyboard(&self, vk: u16, is_down: bool) -> bool {
+        // Bare modifiers are never sources, and querying their state would only
+        // slow the hot path down.
+        if keys::is_modifier_vk(vk) {
+            return false;
+        }
+        let outcome = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !inner.keyboard.is_active() {
+                return false;
+            }
+            let modifiers = Self::pressed_modifiers();
+            inner.keyboard.handle(vk, is_down, &modifiers)
+        };
+        self.cv.notify_all();
+        self.execute(outcome.effects);
+        outcome.suppress
     }
 
     fn pressed_modifiers() -> Vec<String> {
