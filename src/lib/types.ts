@@ -200,6 +200,10 @@ export interface CaptureControl {
   onToggle: () => void;
   /** Keep the last log visible after Stop, until the session value changes. */
   showLog?: boolean;
+  /** Sequence of the input currently applied to the mapping. */
+  selectedSeq?: number;
+  /** Choose a captured gesture explicitly from the log. */
+  onPick?: (event: CaptureEvent) => void;
 }
 
 export interface InputSample {  ageMs: number;

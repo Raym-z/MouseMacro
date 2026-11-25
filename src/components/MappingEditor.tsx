@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -35,6 +35,7 @@ import {
   newMapping,
   type Action,
   type CaptureControl,
+  type CaptureEvent,
   type CaptureKind,
   type MacroStep,
   type MacroStepType,
@@ -205,11 +206,7 @@ export function ActionFields({
                   setAction({ ...action, keys });
                 }
               }}
-              onRecord={capture.onToggle}
-              recording={capture.recording}
-              recordReady={capture.ready}
-              recordEvents={capture.events}
-              showLog={capture.showLog}
+              capture={capture}
             />
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
               {action.type === "holdKeys"
@@ -506,11 +503,7 @@ export function ActionFields({
               mode="combo"
               keys={action.keys}
               onChange={(keys) => setAction({ ...action, keys })}
-              onRecord={capture.onToggle}
-              recording={capture.recording}
-              recordReady={capture.ready}
-              recordEvents={capture.events}
-              showLog={capture.showLog}
+              capture={capture}
             />
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
               The first press holds the keys down, the next press releases
@@ -578,8 +571,8 @@ export function MappingSheet({
   const [newStepType, setNewStepType] = useState<MacroStepType>("tapKeys");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const appliedSeq = useRef(0);
-
+  const [appliedSeq, setAppliedSeq] = useState(0);
+  const [manualPick, setManualPick] = useState(false);
   useEffect(() => {
     if (!open) {
       setCaptureTarget(null);
@@ -606,38 +599,36 @@ export function MappingSheet({
   const capture = useCaptureSession(sessionKind, () => setCaptureTarget(null));
 
   const toggleCapture = (target: "button" | "keys") => {
-    appliedSeq.current = 0;
+    const next = captureTarget === target ? null : target;
+    if (next !== null) {
+      // Replaying the previous session's events into a freshly focused field
+      // would be surprising; only apply input captured from now on.
+      setAppliedSeq(
+        captureTarget === null
+          ? 0
+          : capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
+      );
+      setManualPick(false);
+    }
     setLastTarget(target);
-    setCaptureTarget((current) => (current === target ? null : target));
+    setCaptureTarget(next);
   };
 
-  const keyCapture: CaptureControl = {
-    recording: captureTarget === "keys",
-    ready: capture.ready,
-    events: capture.events,
-    onToggle: () => toggleCapture("keys"),
-    showLog: lastTarget === "keys",
-  };
-
-  useEffect(() => {
-    const selected = [...capture.events]
-      .reverse()
-      .find((event) => event.decision === "selected" && event.kind === "down");
-    if (!selected || selected.seq <= appliedSeq.current) return;
-    appliedSeq.current = selected.seq;
-
-    if (sessionKind === "mouse" && selected.button) {
-      setButton(selected.button);
+  const applyCaptured = (event: CaptureEvent) => {
+    if (event.source === "mouse" && event.kind === "down" && event.button) {
+      setButton(event.button);
       setTrigger((current) =>
-        current.type === "withButton" && current.button === selected.button
+        current.type === "withButton" && current.button === event.button
           ? { type: "singleClick" }
           : current,
       );
-      toast(`Recorded ${buttonLabel(selected.button)}`, "success");
-    } else if (sessionKind === "keyboard" && selected.token) {
-      const combo = [...selected.modifiers, selected.token];
+      toast(`Recorded ${buttonLabel(event.button)}`, "success");
+      return;
+    }
+    if (event.source === "keyboard" && event.kind === "down" && event.token) {
+      const combo = [...event.modifiers, event.token];
       if (action.type === "key") {
-        setAction({ type: "key", key: selected.token });
+        setAction({ type: "key", key: event.token });
       } else if (
         action.type === "shortcut" ||
         action.type === "holdKeys" ||
@@ -646,7 +637,33 @@ export function MappingSheet({
         setAction({ ...action, keys: combo });
       }
     }
-  }, [capture.events, sessionKind, action, toast]);
+  };
+
+  const pickCaptured = (event: CaptureEvent) => {
+    setManualPick(true);
+    setAppliedSeq(event.seq);
+    applyCaptured(event);
+  };
+
+  const keyCapture: CaptureControl = {
+    recording: captureTarget === "keys",
+    ready: capture.ready,
+    events: capture.events,
+    onToggle: () => toggleCapture("keys"),
+    showLog: lastTarget === "keys",
+    selectedSeq: appliedSeq,
+    onPick: pickCaptured,
+  };
+
+  useEffect(() => {
+    if (manualPick) return;
+    const selected = [...capture.events]
+      .reverse()
+      .find((event) => event.decision === "selected" && event.kind === "down");
+    if (!selected || selected.seq <= appliedSeq) return;
+    setAppliedSeq(selected.seq);
+    applyCaptured(selected);
+  }, [capture.events, appliedSeq, manualPick, action, toast]);
 
   useEffect(() => {
     if (!capture.error) return;
@@ -852,6 +869,8 @@ export function MappingSheet({
               events={capture.events}
               ready={capture.ready}
               active={captureTarget === "button"}
+              selectedSeq={appliedSeq}
+              onPick={pickCaptured}
               className="mt-3"
             />
           )}

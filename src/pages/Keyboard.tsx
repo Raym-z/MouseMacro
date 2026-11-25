@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Keyboard as KeyboardIcon,
@@ -17,6 +17,7 @@ import { Field, Segmented } from "../components/Field";
 import { KeySelector } from "../components/KeySelector";
 import { KeyCombo } from "../components/Kbd";
 import { ConfirmDialog } from "../components/Modal";
+import { Select } from "../components/Select";
 import { Sheet } from "../components/Sheet";
 import { Switch } from "../components/Switch";
 import { ActionFields } from "../components/MappingEditor";
@@ -32,6 +33,7 @@ import {
   newKeyMapping,
   type Action,
   type CaptureControl,
+  type CaptureEvent,
   type KeyMapping,
   type MacroStepType,
 } from "../lib/types";
@@ -112,6 +114,13 @@ export function KeyboardPage() {
     setEditorOpen(true);
   };
 
+  const switchProfile = async (profileId: string) => {
+    await runSnapshot(
+      () => api.setActiveProfile(profileId),
+      "Profile switched",
+    );
+  };
+
   const toggleMapping = async (mapping: KeyMapping, enabled: boolean) => {
     if (!profile) return;
     setBusyId(mapping.id);
@@ -141,7 +150,7 @@ export function KeyboardPage() {
         title="Keyboard"
         description="Turn a key or key combination into another key, or run any MouseMacro action. Off by default: it installs an always-on keyboard hook."
         actions={
-          <div className="flex items-center gap-2">
+          <>
             <Badge
               tone={keyboard.enabled ? (engineOn ? "success" : "warning") : "outline"}
               dot
@@ -152,6 +161,23 @@ export function KeyboardPage() {
                   : "Mappings paused"
                 : "Off"}
             </Badge>
+            <div className="flex items-center gap-2">
+              <span className="hidden text-[11px] font-medium text-zinc-400 dark:text-zinc-500 sm:block">
+                Profile
+              </span>
+              <Select
+                value={config.activeProfileId}
+                onChange={(event) => switchProfile(event.target.value)}
+                className="w-[180px]"
+                aria-label="Active profile"
+              >
+                {config.profiles.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
             <Button
               variant="secondary"
               icon={<ShieldAlert />}
@@ -159,7 +185,10 @@ export function KeyboardPage() {
             >
               Exceptions
             </Button>
-          </div>
+            <Button variant="primary" icon={<Plus />} onClick={openNew}>
+              Add mapping
+            </Button>
+          </>
         }
       />
 
@@ -391,7 +420,8 @@ function KeyMappingSheet({
   const [newStepType, setNewStepType] = useState<MacroStepType>("tapKeys");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const appliedSeq = useRef(0);
+  const [appliedSeq, setAppliedSeq] = useState(0);
+  const [manualPick, setManualPick] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -421,9 +451,45 @@ function KeyMappingSheet({
   );
 
   const toggleCapture = (target: "source" | "target" | "keys") => {
-    appliedSeq.current = 0;
+    const next = captureTarget === target ? null : target;
+    if (next !== null) {
+      setAppliedSeq(
+        captureTarget === null
+          ? 0
+          : capture.events.reduce((max, event) => Math.max(max, event.seq), 0),
+      );
+      setManualPick(false);
+    }
     setLastTarget(target);
-    setCaptureTarget((current) => (current === target ? null : target));
+    setCaptureTarget(next);
+  };
+
+  const applyCaptured = (event: CaptureEvent) => {
+    if (event.source !== "keyboard" || event.kind !== "down" || !event.token) {
+      return;
+    }
+    const combo = [...event.modifiers, event.token];
+    if (captureTarget === "source") {
+      setSource(combo);
+    } else if (captureTarget === "target") {
+      setTarget(combo);
+    } else if (captureTarget === "keys") {
+      if (action.type === "key") {
+        setAction({ type: "key", key: event.token });
+      } else if (
+        action.type === "shortcut" ||
+        action.type === "holdKeys" ||
+        action.type === "toggleKeys"
+      ) {
+        setAction({ ...action, keys: combo });
+      }
+    }
+  };
+
+  const pickCaptured = (event: CaptureEvent) => {
+    setManualPick(true);
+    setAppliedSeq(event.seq);
+    applyCaptured(event);
   };
 
   const captureControl = (
@@ -434,33 +500,19 @@ function KeyMappingSheet({
     events: capture.events,
     onToggle: () => toggleCapture(target),
     showLog: lastTarget === target,
+    selectedSeq: appliedSeq,
+    onPick: pickCaptured,
   });
 
   useEffect(() => {
+    if (manualPick) return;
     const selected = [...capture.events]
       .reverse()
       .find((event) => event.decision === "selected" && event.kind === "down");
-    if (!selected || selected.seq <= appliedSeq.current || !selected.token) {
-      return;
-    }
-    appliedSeq.current = selected.seq;
-    const combo = [...selected.modifiers, selected.token];
-    if (captureTarget === "source") {
-      setSource(combo);
-    } else if (captureTarget === "target") {
-      setTarget(combo);
-    } else if (captureTarget === "keys") {
-      if (action.type === "key") {
-        setAction({ type: "key", key: selected.token });
-      } else if (
-        action.type === "shortcut" ||
-        action.type === "holdKeys" ||
-        action.type === "toggleKeys"
-      ) {
-        setAction({ ...action, keys: combo });
-      }
-    }
-  }, [capture.events, captureTarget, action]);
+    if (!selected || selected.seq <= appliedSeq) return;
+    setAppliedSeq(selected.seq);
+    applyCaptured(selected);
+  }, [capture.events, appliedSeq, manualPick, captureTarget, action]);
 
   useEffect(() => {
     if (!capture.error) return;
@@ -545,11 +597,7 @@ function KeyMappingSheet({
             mode="combo"
             keys={source}
             onChange={setSource}
-            onRecord={() => toggleCapture("source")}
-            recording={captureTarget === "source"}
-            recordReady={capture.ready}
-            recordEvents={capture.events}
-            showLog={lastTarget === "source"}
+            capture={captureControl("source")}
           />
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
             One key plus optional modifiers. A bare modifier (Ctrl, Shift, Alt,
@@ -577,11 +625,7 @@ function KeyMappingSheet({
                 mode="combo"
                 keys={target}
                 onChange={setTarget}
-                onRecord={() => toggleCapture("target")}
-                recording={captureTarget === "target"}
-                recordReady={capture.ready}
-                recordEvents={capture.events}
-                showLog={lastTarget === "target"}
+                capture={captureControl("target")}
               />
               <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
                 While the source is held, the target stays held. Releasing the

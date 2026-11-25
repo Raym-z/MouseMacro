@@ -120,6 +120,24 @@ impl CaptureSession {
         }
     }
 
+    /// Modifier tokens for the keys currently held. Derived from captured
+    /// events rather than `GetAsyncKeyState`: while capturing we swallow the
+    /// modifier key-downs, so the system never records them as pressed.
+    fn held_modifiers(&self) -> Vec<String> {
+        let mut pressed: Vec<String> = Vec::new();
+        for vk in &self.held_keys {
+            let name = crate::engine::keys::name_from_vk(*vk);
+            if is_modifier_name(&name) && !pressed.contains(&name) {
+                pressed.push(name);
+            }
+        }
+        crate::engine::keys::MODIFIER_ORDER
+            .iter()
+            .filter(|modifier| pressed.iter().any(|name| name == *modifier))
+            .map(|modifier| (*modifier).to_string())
+            .collect()
+    }
+
     fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
@@ -293,7 +311,6 @@ impl CaptureRuntime {
         vk: u16,
         is_down: bool,
         meta: InputMeta,
-        modifiers: Vec<String>,
     ) -> Option<(u64, CaptureEvent)> {
         let session = self.session.as_ref()?;
         if session.kind != CaptureKind::Keyboard {
@@ -303,6 +320,7 @@ impl CaptureRuntime {
         let token = crate::engine::keys::name_from_vk(vk);
         let modifier_key = is_modifier_name(&token);
         let repeat = is_down && session.held_keys.contains(&vk);
+        let modifiers = session.held_modifiers();
 
         let decision = if meta.own {
             CaptureDecision::Own
@@ -316,12 +334,16 @@ impl CaptureRuntime {
 
         let seq = self.session.as_mut()?.next_seq();
         if let Some(session) = self.session.as_mut() {
-            if is_down {
-                if !session.held_keys.contains(&vk) {
-                    session.held_keys.push(vk);
+            // Only physical, accepted input contributes to the held-modifier
+            // state used for combinations.
+            if meta.accepted && !meta.own {
+                if is_down {
+                    if !session.held_keys.contains(&vk) {
+                        session.held_keys.push(vk);
+                    }
+                } else {
+                    session.held_keys.retain(|held| *held != vk);
                 }
-            } else {
-                session.held_keys.retain(|held| *held != vk);
             }
         }
         let event = CaptureEvent {
@@ -434,26 +456,25 @@ mod tests {
         runtime.start(CaptureKind::Keyboard, 0);
 
         let (_, ctrl) = runtime
-            .record_key(10, 0x11, true, InputMeta::physical(), vec!["ctrl".into()])
+            .record_key(10, 0x11, true, InputMeta::physical())
             .unwrap();
         assert_eq!(ctrl.decision, CaptureDecision::Seen, "modifier alone is not a source");
 
-        let modifiers = vec!["ctrl".to_string()];
         let (_, first) = runtime
-            .record_key(20, 0x7B, true, InputMeta::physical(), modifiers.clone())
+            .record_key(20, 0x7B, true, InputMeta::physical())
             .unwrap();
         assert_eq!(first.token.as_deref(), Some("f12"));
         assert_eq!(first.decision, CaptureDecision::Selected);
-        assert_eq!(first.modifiers, modifiers);
+        assert_eq!(first.modifiers, vec!["ctrl".to_string()]);
 
         let (_, repeat) = runtime
-            .record_key(30, 0x7B, true, InputMeta::physical(), modifiers.clone())
+            .record_key(30, 0x7B, true, InputMeta::physical())
             .unwrap();
         assert!(repeat.repeat);
         assert_eq!(repeat.decision, CaptureDecision::Seen, "auto-repeat must not reselect");
 
         let (_, release) = runtime
-            .record_key(40, 0x7B, false, InputMeta::physical(), modifiers)
+            .record_key(40, 0x7B, false, InputMeta::physical())
             .unwrap();
         assert_eq!(release.kind, "up");
     }
@@ -468,7 +489,7 @@ mod tests {
             accepted: false,
         };
         let (_, event) = runtime
-            .record_key(10, 0x7B, true, filtered, Vec::new())
+            .record_key(10, 0x7B, true, filtered)
             .unwrap();
         assert_eq!(event.decision, CaptureDecision::Filtered);
 
@@ -478,7 +499,7 @@ mod tests {
             accepted: false,
         };
         let (_, event) = runtime
-            .record_key(20, 0x7B, true, own, Vec::new())
+            .record_key(20, 0x7B, true, own)
             .unwrap();
         assert_eq!(event.decision, CaptureDecision::Own);
     }
@@ -505,7 +526,6 @@ mod tests {
                 0x41,
                 true,
                 InputMeta::physical(),
-                Vec::new(),
             );
         }
         let id = runtime.session_id().unwrap();
@@ -525,7 +545,7 @@ mod tests {
         let mut runtime = runtime();
         runtime.start(CaptureKind::Keyboard, 0);
         for _ in 0..3 {
-            runtime.record_key(10, 0x41, true, InputMeta::physical(), Vec::new());
+            runtime.record_key(10, 0x41, true, InputMeta::physical());
         }
         let id = runtime.session_id().unwrap();
         let tail = runtime.events_since(id, 2).unwrap();

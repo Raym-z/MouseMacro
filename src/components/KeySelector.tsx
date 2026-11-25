@@ -11,19 +11,14 @@ import {
   keyTokenLabel,
   searchKeys,
 } from "../lib/keys";
-import type { CaptureEvent } from "../lib/types";
+import type { CaptureControl } from "../lib/types";
 
 interface KeySelectorProps {
   mode: "combo" | "single";
   keys: string[];
   onChange: (keys: string[]) => void;
-  /** Starts or stops the shared capture session. */
-  onRecord?: () => void;
-  recording?: boolean;
-  recordReady?: boolean;
-  recordEvents?: CaptureEvent[];
-  /** Keep showing the last log after Stop. */
-  showLog?: boolean;
+  /** Shared recording session for this picker. */
+  capture?: CaptureControl;
 }
 
 /** Keeps Ctrl, Shift, Alt, Win in a stable order regardless of click order. */
@@ -40,11 +35,7 @@ export function KeySelector({
   mode,
   keys,
   onChange,
-  onRecord,
-  recording = false,
-  recordReady = false,
-  recordEvents,
-  showLog = false,
+  capture,
 }: KeySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -134,13 +125,13 @@ export function KeySelector({
               Clear
             </Button>
           )}
-          {onRecord && (
+          {capture && (
             <Button
               size="sm"
-              variant={recording ? "subtle" : "ghost"}
-              onClick={onRecord}
+              variant={capture.recording ? "subtle" : "ghost"}
+              onClick={capture.onToggle}
             >
-              {recording ? "Stop" : "Record"}
+              {capture.recording ? "Stop" : "Record"}
             </Button>
           )}
           <Button
@@ -188,14 +179,18 @@ export function KeySelector({
         )}
       </div>
 
-      {(recording || (showLog && (recordEvents?.length ?? 0) > 0)) && (
-        <CaptureLog
-          events={recordEvents ?? []}
-          ready={recordReady}
-          active={recording}
-          className="mt-2.5"
-        />
-      )}
+      {capture &&
+        (capture.recording ||
+          (capture.showLog && capture.events.length > 0)) && (
+          <CaptureLog
+            events={capture.events}
+            ready={capture.ready}
+            active={capture.recording}
+            selectedSeq={capture.selectedSeq}
+            onPick={capture.onPick}
+            className="mt-2.5"
+          />
+        )}
 
       {open && (
         <div

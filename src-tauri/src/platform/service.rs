@@ -1097,13 +1097,7 @@ impl EngineService {
                 }
             }
 
-            let recorded = capture.record_key(
-                time,
-                vk,
-                is_down,
-                meta,
-                Self::pressed_modifiers(),
-            );
+            let recorded = capture.record_key(time, vk, is_down, meta);
             if let Some((id, event)) = recorded {
                 drop(capture);
                 self.emit_capture_event(id, &event);
