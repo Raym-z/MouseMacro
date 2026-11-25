@@ -12,6 +12,8 @@ interface SheetProps {
   children: ReactNode;
   footer?: ReactNode;
   width?: string;
+  /** While a capture session runs, ignore backdrop clicks and Escape. */
+  locked?: boolean;
 }
 
 export function Sheet({
@@ -22,9 +24,10 @@ export function Sheet({
   children,
   footer,
   width = "w-[560px]",
+  locked = false,
 }: SheetProps) {
   useEffect(() => {
-    if (!open) return;
+    if (!open || locked) return;
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -33,7 +36,7 @@ export function Sheet({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  }, [open, onClose, locked]);
 
   if (!open) return null;
 
@@ -41,7 +44,7 @@ export function Sheet({
     <div className="fixed inset-0 z-[70] flex justify-end">
       <div
         className="animate-fade absolute inset-0 bg-zinc-950/30 backdrop-blur-[2px] dark:bg-black/50"
-        onMouseDown={onClose}
+        onMouseDown={locked ? undefined : onClose}
       />
       <div
         role="dialog"

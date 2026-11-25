@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Keyboard as KeyboardIcon,
@@ -21,7 +21,7 @@ import { Sheet } from "../components/Sheet";
 import { Switch } from "../components/Switch";
 import { ActionFields } from "../components/MappingEditor";
 import { useToast } from "../components/Toast";
-import { useCapture } from "../hooks/useCapture";
+import { useCaptureSession } from "../hooks/useCaptureSession";
 import { api, errorMessage } from "../lib/api";
 import { cn } from "../lib/cn";
 import {
@@ -31,7 +31,7 @@ import {
 import {
   newKeyMapping,
   type Action,
-  type CapturePayload,
+  type CaptureControl,
   type KeyMapping,
   type MacroStepType,
 } from "../lib/types";
@@ -385,10 +385,13 @@ function KeyMappingSheet({
   const [captureTarget, setCaptureTarget] = useState<
     "source" | "target" | "keys" | null
   >(null);
-  const [liveModifiers, setLiveModifiers] = useState<string[]>([]);
+  const [lastTarget, setLastTarget] = useState<
+    "source" | "target" | "keys" | null
+  >(null);
   const [newStepType, setNewStepType] = useState<MacroStepType>("tapKeys");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const appliedSeq = useRef(0);
 
   useEffect(() => {
     if (!open) {
@@ -410,69 +413,60 @@ function KeyMappingSheet({
     setEnabled(draft.enabled);
     setError(null);
     setCaptureTarget(null);
-    setLiveModifiers([]);
     setNewStepType("tapKeys");
   }, [open, mapping]);
 
-  useCapture(
-    captureTarget === null ? "none" : "keyboard",
-    (payload: CapturePayload) => {
-      if (captureTarget === "source" || captureTarget === "target") {
-        if (payload.kind === "cancel") {
-          setCaptureTarget(null);
-          setLiveModifiers([]);
-          return;
-        }
-        if (payload.kind === "modifiers") {
-          setLiveModifiers(payload.keys);
-          return;
-        }
-        if (payload.kind === "keys") {
-          if (captureTarget === "source") setSource(payload.keys);
-          else setTarget(payload.keys);
-          setLiveModifiers([]);
-          setCaptureTarget(null);
-        }
-        return;
-      }
-      if (captureTarget === "keys") {
-        if (payload.kind === "cancel") {
-          setCaptureTarget(null);
-          setLiveModifiers([]);
-          return;
-        }
-        if (payload.kind === "modifiers") {
-          setLiveModifiers(payload.keys);
-          return;
-        }
-        if (payload.kind === "keys") {
-          if (action.type === "key") {
-            const primary = [...payload.keys]
-              .reverse()
-              .find((key) => !["ctrl", "shift", "alt", "win"].includes(key));
-            if (primary) setAction({ type: "key", key: primary });
-          } else if (
-            action.type === "shortcut" ||
-            action.type === "holdKeys" ||
-            action.type === "toggleKeys"
-          ) {
-            setAction({ ...action, keys: payload.keys });
-          }
-          setLiveModifiers([]);
-          setCaptureTarget(null);
-        }
-      }
-    },
-    () => setCaptureTarget(null),
-    (message) => {
-      if (captureTarget === "keys") {
-        toast(
-          `${message} Choose the keys manually instead — that path never needs the hook.`,
-          "error",
-        );
-      }
-    },
+  const capture = useCaptureSession(captureTarget === null ? null : "keyboard", () =>
+    setCaptureTarget(null),
   );
+
+  const toggleCapture = (target: "source" | "target" | "keys") => {
+    appliedSeq.current = 0;
+    setLastTarget(target);
+    setCaptureTarget((current) => (current === target ? null : target));
+  };
+
+  const captureControl = (
+    target: "source" | "target" | "keys",
+  ): CaptureControl => ({
+    recording: captureTarget === target,
+    ready: capture.ready,
+    events: capture.events,
+    onToggle: () => toggleCapture(target),
+    showLog: lastTarget === target,
+  });
+
+  useEffect(() => {
+    const selected = [...capture.events]
+      .reverse()
+      .find((event) => event.decision === "selected" && event.kind === "down");
+    if (!selected || selected.seq <= appliedSeq.current || !selected.token) {
+      return;
+    }
+    appliedSeq.current = selected.seq;
+    const combo = [...selected.modifiers, selected.token];
+    if (captureTarget === "source") {
+      setSource(combo);
+    } else if (captureTarget === "target") {
+      setTarget(combo);
+    } else if (captureTarget === "keys") {
+      if (action.type === "key") {
+        setAction({ type: "key", key: selected.token });
+      } else if (
+        action.type === "shortcut" ||
+        action.type === "holdKeys" ||
+        action.type === "toggleKeys"
+      ) {
+        setAction({ ...action, keys: combo });
+      }
+    }
+  }, [capture.events, captureTarget, action]);
+
+  useEffect(() => {
+    if (!capture.error) return;
+    setError(capture.error);
+    setCaptureTarget(null);
+  }, [capture.error]);
 
   const normalize = (keys: string[]) =>
     keys.map((key) => key.trim().toLowerCase()).filter(Boolean);
@@ -527,6 +521,7 @@ function KeyMappingSheet({
     <Sheet
       open={open}
       onClose={onClose}
+      locked={captureTarget !== null}
       title={mapping ? "Edit keyboard mapping" : "New keyboard mapping"}
       subtitle="A key combination becomes another key, or runs an action."
       footer={
@@ -550,22 +545,17 @@ function KeyMappingSheet({
             mode="combo"
             keys={source}
             onChange={setSource}
-            onRecord={() => {
-              setLiveModifiers([]);
-              setCaptureTarget("source");
-            }}
+            onRecord={() => toggleCapture("source")}
             recording={captureTarget === "source"}
+            recordReady={capture.ready}
+            recordEvents={capture.events}
+            showLog={lastTarget === "source"}
           />
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
             One key plus optional modifiers. A bare modifier (Ctrl, Shift, Alt,
             Win) cannot be a source. Matching is exact: a plain F12 mapping does
             not fire when Ctrl is held.
           </p>
-          {liveModifiers.length > 0 && captureTarget === "source" && (
-            <p className="mt-1 text-[11px] text-secondary">
-              Held: {liveModifiers.join(" + ")}
-            </p>
-          )}
         </EditorSection>
 
         <EditorSection
@@ -587,11 +577,11 @@ function KeyMappingSheet({
                 mode="combo"
                 keys={target}
                 onChange={setTarget}
-                onRecord={() => {
-                  setLiveModifiers([]);
-                  setCaptureTarget("target");
-                }}
+                onRecord={() => toggleCapture("target")}
                 recording={captureTarget === "target"}
+                recordReady={capture.ready}
+                recordEvents={capture.events}
+                showLog={lastTarget === "target"}
               />
               <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
                 While the source is held, the target stays held. Releasing the
@@ -612,11 +602,7 @@ function KeyMappingSheet({
           <ActionFields
             action={action}
             setAction={setAction}
-            captureTarget={captureTarget === "keys" ? "keys" : null}
-            setCaptureTarget={(next) =>
-              setCaptureTarget(next === "keys" ? "keys" : null)
-            }
-            setLiveModifiers={setLiveModifiers}
+            capture={captureControl("keys")}
             newStepType={newStepType}
             setNewStepType={setNewStepType}
           />

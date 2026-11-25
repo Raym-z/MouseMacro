@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Keyboard, Search, X } from "lucide-react";
 import { Button } from "./Button";
 import { Kbd } from "./Kbd";
+import { CaptureLog } from "./CaptureLog";
 import { cn } from "../lib/cn";
 import {
   MODIFIER_KEYS,
@@ -9,16 +10,20 @@ import {
   isModifierToken,
   keyTokenLabel,
   searchKeys,
-  tokenFromKeyboardEvent,
 } from "../lib/keys";
+import type { CaptureEvent } from "../lib/types";
 
 interface KeySelectorProps {
   mode: "combo" | "single";
   keys: string[];
   onChange: (keys: string[]) => void;
-  /** Optional global capture (uses the low-level hook) kept as a fallback. */
+  /** Starts or stops the shared capture session. */
   onRecord?: () => void;
   recording?: boolean;
+  recordReady?: boolean;
+  recordEvents?: CaptureEvent[];
+  /** Keep showing the last log after Stop. */
+  showLog?: boolean;
 }
 
 /** Keeps Ctrl, Shift, Alt, Win in a stable order regardless of click order. */
@@ -37,11 +42,12 @@ export function KeySelector({
   onChange,
   onRecord,
   recording = false,
+  recordReady = false,
+  recordEvents,
+  showLog = false,
 }: KeySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [listening, setListening] = useState(false);
-  const [liveModifiers, setLiveModifiers] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -61,8 +67,6 @@ export function KeySelector({
 
   const closePanel = () => {
     setOpen(false);
-    setListening(false);
-    setLiveModifiers([]);
     setQuery("");
   };
 
@@ -89,8 +93,7 @@ export function KeySelector({
     if (mode === "single") {
       onChange([token]);
     } else {
-      const held = orderModifiers([...modifiers, ...liveModifiers]);
-      onChange([...held, token]);
+      onChange([...orderModifiers(modifiers), token]);
     }
     closePanel();
   };
@@ -103,37 +106,8 @@ export function KeySelector({
     onChange([...orderModifiers(next), ...rest]);
   };
 
-  // Page-level key listening while "Press a key" is armed. A capture-phase
-  // listener stops Escape before the surrounding sheet sees it.
-  useEffect(() => {
-    if (!listening) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        setListening(false);
-        setLiveModifiers([]);
-        return;
-      }
-      const token = tokenFromKeyboardEvent(event);
-      if (!token) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (isModifierToken(token)) {
-        setLiveModifiers((current) =>
-          current.includes(token) ? current : [...current, token],
-        );
-        return;
-      }
-      applyKey(token);
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  });
-
   const clear = () => {
     onChange([]);
-    setLiveModifiers([]);
   };
 
   const chipClass = (active: boolean) =>
@@ -166,7 +140,7 @@ export function KeySelector({
               variant={recording ? "subtle" : "ghost"}
               onClick={onRecord}
             >
-              {recording ? "Listening…" : "Record"}
+              {recording ? "Stop" : "Record"}
             </Button>
           )}
           <Button
@@ -213,6 +187,15 @@ export function KeySelector({
           </span>
         )}
       </div>
+
+      {(recording || (showLog && (recordEvents?.length ?? 0) > 0)) && (
+        <CaptureLog
+          events={recordEvents ?? []}
+          ready={recordReady}
+          active={recording}
+          className="mt-2.5"
+        />
+      )}
 
       {open && (
         <div
@@ -267,34 +250,7 @@ export function KeySelector({
                 <X className="size-3.5" />
               </button>
             )}
-            <Button
-              size="sm"
-              variant={listening ? "subtle" : "ghost"}
-              onClick={() => {
-                setLiveModifiers([]);
-                setListening((value) => !value);
-              }}
-            >
-              {listening ? "Press now…" : "Press a key"}
-            </Button>
           </div>
-
-          {listening && (
-            <div className="border-b border-indigo-500/15 bg-indigo-500/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-indigo-900 dark:text-indigo-200">
-              <span className="animate-pulse-dot mr-1.5 inline-block size-1.5 rounded-full bg-indigo-500 align-middle" />
-              {liveModifiers.length > 0 ? (
-                <>
-                  Holding {liveModifiers.map(keyTokenLabel).join(" + ")} — press the
-                  final key.
-                </>
-              ) : (
-                <>
-                  Press any key on your keyboard. This uses the app window only and
-                  does not need the global hook. Esc cancels.
-                </>
-              )}
-            </div>
-          )}
 
           <div className="max-h-[224px] space-y-2.5 overflow-y-auto px-2.5 py-2.5">
             {results.length === 0 ? (

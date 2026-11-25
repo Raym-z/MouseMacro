@@ -161,6 +161,28 @@ impl AppState {
         Ok(self.snapshot())
     }
 
+    /// Starts a recording session; returns its id and the events seen so far.
+    pub fn start_capture(
+        &self,
+        kind: &str,
+    ) -> Result<crate::platform::capture::CaptureSessionInfo, String> {
+        let kind = crate::platform::capture::CaptureKind::from_str(kind)
+            .ok_or_else(|| "Unknown capture kind.".to_string())?;
+        self.engine.start_capture(kind)
+    }
+
+    pub fn stop_capture(&self, session_id: u64) {
+        self.engine.stop_capture(session_id);
+    }
+
+    pub fn capture_events(
+        &self,
+        session_id: u64,
+        since_seq: u64,
+    ) -> Vec<crate::platform::capture::CaptureEvent> {
+        self.engine.capture_events(session_id, since_seq)
+    }
+
     pub fn set_active_profile(&self, profile_id: &str) -> Result<Snapshot, String> {
         let mut config = self.cfg();
         if !config.profiles.iter().any(|p| p.id == profile_id) {

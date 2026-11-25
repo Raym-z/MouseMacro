@@ -448,11 +448,13 @@ unsafe fn handle_mouse_message(message: u32, lparam: LPARAM) -> bool {
         at_ms: 0,
     });
 
-    if ignored {
-        return false;
-    }
+    let meta = crate::platform::capture::InputMeta {
+        injected,
+        own: own_injection,
+        accepted: !ignored,
+    };
 
-    let matched = service.handle_mouse(input);
+    let matched = service.handle_mouse(input, meta);
     if matched {
         mark_last_matched();
     }
@@ -490,15 +492,19 @@ unsafe fn handle_keyboard_message(message: u32, lparam: LPARAM) -> bool {
         return false;
     };
     let injected = info.flags.0 & LLKHF_INJECTED != 0;
-    if should_ignore_injected(
+    let own = info.dwExtraInfo == INJECTION_TAG;
+    let ignored = should_ignore_injected(
         injected,
         info.dwExtraInfo,
         service.accepts_external_injection(),
-    ) {
-        return false;
-    }
+    );
+    let meta = crate::platform::capture::InputMeta {
+        injected,
+        own,
+        accepted: !ignored,
+    };
     let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-    service.handle_key(info.vkCode as u16, is_down)
+    service.handle_key(info.vkCode as u16, is_down, meta)
 }
 
 #[cfg(test)]

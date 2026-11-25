@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -21,7 +21,8 @@ import { KeySelector } from "./KeySelector";
 import { MouseButtonBadge } from "./MouseButtonBadge";
 import { KeyCombo } from "./Kbd";
 import { Callout } from "./Callout";
-import { useCapture } from "../hooks/useCapture";
+import { CaptureLog } from "./CaptureLog";
+import { useCaptureSession } from "../hooks/useCaptureSession";
 import { api, errorMessage } from "../lib/api";
 import { cn } from "../lib/cn";
 import { useApp } from "../state/AppContext";
@@ -33,7 +34,8 @@ import {
   newMacroStep,
   newMapping,
   type Action,
-  type CapturePayload,
+  type CaptureControl,
+  type CaptureKind,
   type MacroStep,
   type MacroStepType,
   type Mapping,
@@ -150,17 +152,13 @@ const MACRO_STEP_OPTIONS: Array<{ value: MacroStepType; label: string }> = [
 export function ActionFields({
   action,
   setAction,
-  captureTarget,
-  setCaptureTarget,
-  setLiveModifiers,
+  capture,
   newStepType,
   setNewStepType,
 }: {
   action: Action;
   setAction: (action: Action) => void;
-  captureTarget: "button" | "keys" | null;
-  setCaptureTarget: (target: "button" | "keys" | null) => void;
-  setLiveModifiers: (keys: string[]) => void;
+  capture: CaptureControl;
   newStepType: MacroStepType;
   setNewStepType: (type: MacroStepType) => void;
 }) {
@@ -207,16 +205,16 @@ export function ActionFields({
                   setAction({ ...action, keys });
                 }
               }}
-              onRecord={() => {
-                setLiveModifiers([]);
-                setCaptureTarget("keys");
-              }}
-              recording={captureTarget === "keys"}
+              onRecord={capture.onToggle}
+              recording={capture.recording}
+              recordReady={capture.ready}
+              recordEvents={capture.events}
+              showLog={capture.showLog}
             />
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
               {action.type === "holdKeys"
-                ? "Keys stay held until the trigger button is released. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."
-                : "Keys are pressed and released together. “Record” also works but needs the global keyboard hook, which some games and secure windows block — choosing keys manually always works."}
+                ? "Keys stay held until the source is released. Record captures the exact modifiers; Esc stops. Choosing keys manually needs no hook."
+                : "Keys are pressed and released together. Record captures the exact modifiers; Esc stops. Choosing keys manually needs no hook."}
             </p>
           </div>
         )}
@@ -508,11 +506,11 @@ export function ActionFields({
               mode="combo"
               keys={action.keys}
               onChange={(keys) => setAction({ ...action, keys })}
-              onRecord={() => {
-                setLiveModifiers([]);
-                setCaptureTarget("keys");
-              }}
-              recording={captureTarget === "keys"}
+              onRecord={capture.onToggle}
+              recording={capture.recording}
+              recordReady={capture.ready}
+              recordEvents={capture.events}
+              showLog={capture.showLog}
             />
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
               The first press holds the keys down, the next press releases
@@ -576,10 +574,11 @@ export function MappingSheet({
   const [captureTarget, setCaptureTarget] = useState<"button" | "keys" | null>(
     null,
   );
-  const [liveModifiers, setLiveModifiers] = useState<string[]>([]);
+  const [lastTarget, setLastTarget] = useState<"button" | "keys" | null>(null);
   const [newStepType, setNewStepType] = useState<MacroStepType>("tapKeys");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const appliedSeq = useRef(0);
 
   useEffect(() => {
     if (!open) {
@@ -595,91 +594,65 @@ export function MappingSheet({
     setEnabled(source.enabled);
     setError(null);
     setCaptureTarget(null);
-    setLiveModifiers([]);
   }, [open, mapping, initialButton]);
 
-  useEffect(() => {
-    if (captureTarget === null) return;
-    const timer = window.setTimeout(() => setCaptureTarget(null), 15_000);
-    return () => window.clearTimeout(timer);
-  }, [captureTarget]);
-
-  // Mouse capture does not swallow keyboard input, so Escape can still stop it.
-  useEffect(() => {
-    if (captureTarget !== "button") return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setCaptureTarget(null);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [captureTarget]);
-
-  const captureMode =
+  const sessionKind: CaptureKind | null =
     captureTarget === "button"
       ? "mouse"
       : captureTarget === "keys"
         ? "keyboard"
-        : "none";
+        : null;
 
-  useCapture(
-    captureMode,
-    (payload: CapturePayload) => {
-      if (captureTarget === "button") {
-        if (payload.kind === "mouse" && payload.event === "down") {
-          setButton(payload.button);
-          setTrigger((current) =>
-            current.type === "withButton" && current.button === payload.button
-              ? { type: "singleClick" }
-              : current,
-          );
-          setCaptureTarget(null);
-          toast(`Captured ${buttonLabel(payload.button)} button`, "success");
-        }
-        return;
+  const capture = useCaptureSession(sessionKind, () => setCaptureTarget(null));
+
+  const toggleCapture = (target: "button" | "keys") => {
+    appliedSeq.current = 0;
+    setLastTarget(target);
+    setCaptureTarget((current) => (current === target ? null : target));
+  };
+
+  const keyCapture: CaptureControl = {
+    recording: captureTarget === "keys",
+    ready: capture.ready,
+    events: capture.events,
+    onToggle: () => toggleCapture("keys"),
+    showLog: lastTarget === "keys",
+  };
+
+  useEffect(() => {
+    const selected = [...capture.events]
+      .reverse()
+      .find((event) => event.decision === "selected" && event.kind === "down");
+    if (!selected || selected.seq <= appliedSeq.current) return;
+    appliedSeq.current = selected.seq;
+
+    if (sessionKind === "mouse" && selected.button) {
+      setButton(selected.button);
+      setTrigger((current) =>
+        current.type === "withButton" && current.button === selected.button
+          ? { type: "singleClick" }
+          : current,
+      );
+      toast(`Recorded ${buttonLabel(selected.button)}`, "success");
+    } else if (sessionKind === "keyboard" && selected.token) {
+      const combo = [...selected.modifiers, selected.token];
+      if (action.type === "key") {
+        setAction({ type: "key", key: selected.token });
+      } else if (
+        action.type === "shortcut" ||
+        action.type === "holdKeys" ||
+        action.type === "toggleKeys"
+      ) {
+        setAction({ ...action, keys: combo });
       }
-      if (captureTarget === "keys") {
-        if (payload.kind === "cancel") {
-          setCaptureTarget(null);
-          setLiveModifiers([]);
-          return;
-        }
-        if (payload.kind === "modifiers") {
-          setLiveModifiers(payload.keys);
-          return;
-        }
-        if (payload.kind === "keys") {
-          if (action.type === "key") {
-            const primary = [...payload.keys]
-              .reverse()
-              .find((key) => !["ctrl", "shift", "alt", "win"].includes(key));
-            if (primary) setAction({ type: "key", key: primary });
-          } else if (
-            action.type === "shortcut" ||
-            action.type === "holdKeys" ||
-            action.type === "toggleKeys"
-          ) {
-            setAction({ ...action, keys: payload.keys });
-          }
-          setLiveModifiers([]);
-          setCaptureTarget(null);
-        }
-      }
-    },
-    () => {
-      if (captureTarget === "button") setCaptureTarget(null);
-    },
-    (message) => {
-      if (captureTarget === "keys") {
-        toast(
-          `${message} Choose the keys manually instead — that path never needs the hook.`,
-          "error",
-        );
-      }
-    },
-  );
+    }
+  }, [capture.events, sessionKind, action, toast]);
+
+  useEffect(() => {
+    if (!capture.error) return;
+    toast(capture.error, "error");
+    setCaptureTarget(null);
+  }, [capture.error, toast]);
 
   const secondButton = useMemo(() => {
     return MOUSE_BUTTONS.find((candidate) => candidate !== button) ?? "left";
@@ -785,12 +758,11 @@ export function MappingSheet({
     }
   };
 
-  const showCaptureHelp = captureTarget !== null;
-
   return (
     <Sheet
       open={open}
       onClose={onClose}
+      locked={captureTarget !== null}
       title={mapping ? "Edit mapping" : "New mapping"}
       subtitle="Choose the physical button, what it does, and the action it should trigger."
       footer={
@@ -823,37 +795,6 @@ export function MappingSheet({
         </>
       }
     >
-      {showCaptureHelp && (
-        <div className="mb-4 flex items-start gap-3 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2.5">
-          <span className="animate-pulse-dot mt-1 size-1.5 rounded-full bg-indigo-500" />
-          <div className="flex-1 text-[12px] leading-relaxed text-indigo-900 dark:text-indigo-200">
-            <div className="font-semibold">
-              {captureTarget === "button"
-                ? "Click any mouse button"
-                : "Listening for your shortcut"}
-            </div>
-            <div className="mt-0.5 opacity-80">
-              {captureTarget === "button" ? (
-                <>Press a physical mouse button. Press Esc to cancel.</>
-              ) : liveModifiers.length > 0 ? (
-                <>Held: {liveModifiers.map(keyLabel).join(" + ")} — now press the final key.</>
-              ) : (
-                <>
-                  Press the keys you want to use. This uses the global hook; if
-                  nothing is detected, use “Choose” in the action section instead.
-                  Esc cancels.
-                </>
-              )}
-            </div>
-          </div>
-          {captureTarget === "keys" && (
-            <Button size="sm" variant="ghost" onClick={() => setCaptureTarget(null)}>
-              Stop
-            </Button>
-          )}
-        </div>
-      )}
-
       <div className="space-y-6">
         <StepSection
           index="1"
@@ -898,12 +839,21 @@ export function MappingSheet({
               size="sm"
               variant={captureTarget === "button" ? "subtle" : "secondary"}
               icon={<ScanLine />}
-              onClick={() => setCaptureTarget("button")}
+              onClick={() => toggleCapture("button")}
               className="ml-auto"
             >
-              {captureTarget === "button" ? "Detecting…" : "Detect"}
+              {captureTarget === "button" ? "Stop" : "Record"}
             </Button>
           </div>
+          )}
+          {(captureTarget === "button" ||
+            (lastTarget === "button" && capture.events.length > 0)) && (
+            <CaptureLog
+              events={capture.events}
+              ready={capture.ready}
+              active={captureTarget === "button"}
+              className="mt-3"
+            />
           )}
         </StepSection>
 
@@ -1050,9 +1000,7 @@ export function MappingSheet({
         <ActionFields
           action={action}
           setAction={setAction}
-          captureTarget={captureTarget}
-          setCaptureTarget={setCaptureTarget}
-          setLiveModifiers={setLiveModifiers}
+          capture={keyCapture}
           newStepType={newStepType}
           setNewStepType={setNewStepType}
         />

@@ -2,7 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Action,
   BackupInfo,
+  CaptureEvent,
+  CaptureKind,
   CaptureMode,
+  CaptureSessionInfo,
   ExceptionRule,
   InputSample,
   KeyMapping,
@@ -143,6 +146,12 @@ export const api = {
   reloadConfig: () => invoke<Snapshot>("reload_config"),
   setCaptureMode: (mode: CaptureMode) =>
     invoke<Snapshot>("set_capture_mode", { mode }),
+  startCapture: (kind: CaptureKind) =>
+    invoke<CaptureSessionInfo>("start_capture", { kind }),
+  stopCapture: (sessionId: number) =>
+    invoke<void>("stop_capture", { sessionId }),
+  getCaptureEvents: (sessionId: number, sinceSeq: number) =>
+    invoke<CaptureEvent[]>("get_capture_events", { sessionId, sinceSeq }),
   clearWarnings: () => invoke<Snapshot>("clear_warnings"),
   openConfigFolder: () => invoke<void>("open_config_folder"),
   relaunchElevated: () => invoke<void>("relaunch_elevated"),

@@ -349,6 +349,28 @@ pub fn set_capture_mode(state: State<'_, AppState>, mode: String) -> Result<Snap
 }
 
 #[tauri::command]
+pub fn start_capture(
+    state: State<'_, AppState>,
+    kind: String,
+) -> Result<crate::platform::capture::CaptureSessionInfo, String> {
+    state.start_capture(&kind)
+}
+
+#[tauri::command]
+pub fn stop_capture(state: State<'_, AppState>, session_id: u64) {
+    state.stop_capture(session_id);
+}
+
+#[tauri::command]
+pub fn get_capture_events(
+    state: State<'_, AppState>,
+    session_id: u64,
+    since_seq: u64,
+) -> Vec<crate::platform::capture::CaptureEvent> {
+    state.capture_events(session_id, since_seq)
+}
+
+#[tauri::command]
 pub fn clear_warnings(state: State<'_, AppState>) -> Snapshot {
     state.clear_warnings()
 }

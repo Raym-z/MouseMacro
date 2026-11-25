@@ -13,6 +13,9 @@ use crate::config::model::{
 };
 use crate::engine::keyboard::KeyboardEngine;
 use crate::engine::{keys, Effect, EngineConfig, InputEngine, InputEvent};
+use crate::platform::capture::{
+    CaptureEvent, CaptureKind, CaptureRuntime, CaptureSessionInfo, InputMeta,
+};
 use crate::platform::simulate;
 
 pub(crate) fn now_ms() -> u64 {
@@ -453,6 +456,7 @@ pub struct EngineService {
     runtime: Mutex<RuntimeState>,
     activity: Mutex<HashMap<String, u64>>,
     capture: AtomicU8,
+    capture_runtime: Mutex<CaptureRuntime>,
     accept_external_injection: AtomicBool,
     hooks_active: AtomicBool,
     hook_warning: Mutex<Option<String>>,
@@ -476,6 +480,7 @@ impl EngineService {
             runtime: Mutex::new(runtime),
             activity: Mutex::new(HashMap::new()),
             capture: AtomicU8::new(CaptureMode::None as u8),
+            capture_runtime: Mutex::new(CaptureRuntime::default()),
             accept_external_injection: AtomicBool::new(
                 config.settings.process_injected_input,
             ),
@@ -493,6 +498,7 @@ impl EngineService {
             .name("mouse-engine-timer".into())
             .spawn(move || loop {
                 let now = now_ms();
+                service.expire_capture(now);
                 let effects = {
                     let mut inner = service.inner.lock().unwrap_or_else(|e| e.into_inner());
                     match inner.engine.next_deadline() {
@@ -511,8 +517,10 @@ impl EngineService {
                             continue;
                         }
                         None => {
-                            let _guard =
-                                service.cv.wait(inner).unwrap_or_else(|e| e.into_inner());
+                            let _guard = service
+                                .cv
+                                .wait_timeout(inner, Duration::from_millis(500))
+                                .unwrap_or_else(|e| e.into_inner());
                             continue;
                         }
                     }
@@ -800,31 +808,135 @@ impl EngineService {
         self.executor.release_all();
     }
 
+    /// Kept for Input diagnostics, which only needs the passive monitor mode.
+    /// Recording uses the capture session API instead.
     pub fn set_capture_mode(&self, mode: CaptureMode) -> Result<(), String> {
-        let previous = self.capture.swap(mode as u8, Ordering::SeqCst);
-        if previous != mode as u8 && mode != CaptureMode::None {
-            // Do not leave a half-finished gesture behind while the user is
-            // pressing buttons in the capture dialog.
-            self.release_all();
+        match mode {
+            CaptureMode::Monitor => {
+                self.stop_session(None, "replaced");
+                self.capture
+                    .store(CaptureMode::Monitor as u8, Ordering::SeqCst);
+            }
+            CaptureMode::None => {
+                self.stop_session(None, "stopped");
+                self.capture
+                    .store(CaptureMode::None as u8, Ordering::SeqCst);
+                self.sync_keyboard_hook();
+            }
+            CaptureMode::Mouse | CaptureMode::Keyboard => {
+                return Err("Use start_capture to record input.".into());
+            }
         }
-        if mode == CaptureMode::Keyboard {
+        self.cv.notify_all();
+        Ok(())
+    }
+
+    /// Starts a recording session. Any previous session is stopped first.
+    pub fn start_capture(&self, kind: CaptureKind) -> Result<CaptureSessionInfo, String> {
+        self.stop_session(None, "replaced");
+        let info = {
+            let mut runtime = self
+                .capture_runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            runtime.start(kind, now_ms())
+        };
+        self.capture.store(
+            match kind {
+                CaptureKind::Mouse => CaptureMode::Mouse as u8,
+                CaptureKind::Keyboard => CaptureMode::Keyboard as u8,
+            },
+            Ordering::SeqCst,
+        );
+
+        if kind == CaptureKind::Keyboard {
             if let Err(error) = crate::platform::hooks::enable_keyboard_hook() {
-                let message = format!("Shortcut capture is unavailable: {error}");
+                let message = format!("Keyboard recording is unavailable: {error}");
                 self.set_hook_warning(Some(message.clone()));
-                // Drop out of capture mode so the UI does not sit in a dead
-                // "listening" state, and let the caller explain why.
+                self.stop_session(Some(info.id), "failed");
                 self.capture
                     .store(CaptureMode::None as u8, Ordering::SeqCst);
                 self.cv.notify_all();
                 return Err(message);
             }
-        } else {
-            // Leave an opted-in remapping hook installed, but remove the one
-            // that only existed for capture.
-            self.sync_keyboard_hook();
         }
         self.cv.notify_all();
-        Ok(())
+        Ok(info)
+    }
+
+    pub fn stop_capture(&self, id: u64) {
+        let stopped = self.stop_session(Some(id), "stopped");
+        if stopped {
+            self.capture
+                .store(CaptureMode::None as u8, Ordering::SeqCst);
+            self.sync_keyboard_hook();
+            self.cv.notify_all();
+        }
+    }
+
+    pub fn capture_events(&self, id: u64, since_seq: u64) -> Vec<CaptureEvent> {
+        self.capture_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .events_since(id, since_seq)
+            .unwrap_or_default()
+    }
+
+    /// Stops a session, emitting `capture://ended` so the UI can leave the
+    /// listening state even when the watchdog or a replacement stopped it.
+    /// With `only_id`, a stale id is ignored.
+    fn stop_session(&self, only_id: Option<u64>, reason: &str) -> bool {
+        let stopped = {
+            let mut runtime = self
+                .capture_runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match only_id {
+                Some(id) => {
+                    if runtime.stop(id) {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                }
+                None => runtime.stop_any().map(|(id, _)| id),
+            }
+        };
+        let Some(id) = stopped else {
+            return false;
+        };
+        let _ = self.app.emit(
+            "capture://ended",
+            json!({ "sessionId": id, "reason": reason }),
+        );
+        true
+    }
+
+    fn expire_capture(&self, now: u64) {
+        let expired = {
+            let mut runtime = self
+                .capture_runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            runtime.expire(now)
+        };
+        if let Some((id, _)) = expired {
+            self.capture
+                .store(CaptureMode::None as u8, Ordering::SeqCst);
+            let _ = self.app.emit(
+                "capture://ended",
+                json!({ "sessionId": id, "reason": "timeout" }),
+            );
+            self.sync_keyboard_hook();
+            self.cv.notify_all();
+        }
+    }
+
+    fn emit_capture_event(&self, id: u64, event: &CaptureEvent) {
+        let _ = self.app.emit(
+            "capture://event",
+            json!({ "sessionId": id, "event": event }),
+        );
     }
 
     pub fn capture_mode(&self) -> CaptureMode {
@@ -838,25 +950,55 @@ impl EngineService {
 
     /// Entry point for the low-level mouse hook. Returns true when the physical
     /// event must be swallowed.
-    pub fn handle_mouse(&self, input: MouseInput) -> bool {
-        match self.capture_mode() {
-            CaptureMode::Monitor => {
-                self.emit_mouse_capture(input);
-                return false;
-            }
-            CaptureMode::Mouse => {
-                self.emit_mouse_capture(input);
-                if matches!(input, MouseInput::Down(_)) {
-                    self.capture
-                        .store(CaptureMode::None as u8, Ordering::SeqCst);
-                    let _ = self.app.emit("input://capture-ended", ());
-                }
-                return false;
-            }
-            _ => {}
+    pub fn handle_mouse(&self, input: MouseInput, meta: InputMeta) -> bool {
+        if self.capture_mode() == CaptureMode::Monitor {
+            self.emit_mouse_capture(input);
+            return false;
         }
 
         let time = now_ms();
+        let mut capture = self
+            .capture_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if capture.session_kind() == Some(CaptureKind::Mouse) {
+            let recorded = match input {
+                MouseInput::Down(button) => {
+                    capture.record_mouse(time, Some(button), true, None, meta)
+                }
+                MouseInput::Up(button) => {
+                    capture.record_mouse(time, Some(button), false, None, meta)
+                }
+                MouseInput::Wheel { direction, .. } => {
+                    capture.record_mouse(time, None, false, Some(direction), meta)
+                }
+            };
+            if let Some((id, event, selected)) = recorded {
+                let suppress = selected
+                    || matches!(
+                        input,
+                        MouseInput::Up(button) if capture.take_mouse_up(button)
+                    );
+                drop(capture);
+                self.emit_capture_event(id, &event);
+                return suppress;
+            }
+        }
+
+        // A swallowed down can outlive its session when Stop is pressed before
+        // the matching up arrives. Swallow that up so no stray release leaks.
+        if let MouseInput::Up(button) = input {
+            if capture.take_mouse_up(button) {
+                return true;
+            }
+        }
+        drop(capture);
+
+        if !meta.accepted {
+            return false;
+        }
+
         let (event, transform) = match input {
             MouseInput::Down(button) => (InputEvent::ButtonDown { button, time }, None),
             MouseInput::Up(button) => (InputEvent::ButtonUp { button, time }, None),
@@ -929,46 +1071,58 @@ impl EngineService {
     }
 
     /// Entry point for the low-level keyboard hook.
-    pub fn handle_key(&self, vk: u16, is_down: bool) -> bool {
-        if self.capture_mode() == CaptureMode::Keyboard {
-            return self.capture_key(vk, is_down);
+    pub fn handle_key(&self, vk: u16, is_down: bool, meta: InputMeta) -> bool {
+        let time = now_ms();
+        let mut capture = self
+            .capture_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if capture.session_kind() == Some(CaptureKind::Keyboard) {
+            // Escape ends the session. Its matching key-up must stay swallowed
+            // after the session is already gone.
+            if vk == 0x1B && is_down {
+                if let Some((id, _)) = capture.stop_any() {
+                    capture.arm_key_up_suppression(vk);
+                    drop(capture);
+                    self.capture
+                        .store(CaptureMode::None as u8, Ordering::SeqCst);
+                    let _ = self.app.emit(
+                        "capture://ended",
+                        json!({ "sessionId": id, "reason": "cancelled" }),
+                    );
+                    self.sync_keyboard_hook();
+                    self.cv.notify_all();
+                    return true;
+                }
+            }
+
+            let recorded = capture.record_key(
+                time,
+                vk,
+                is_down,
+                meta,
+                Self::pressed_modifiers(),
+            );
+            if let Some((id, event)) = recorded {
+                drop(capture);
+                self.emit_capture_event(id, &event);
+                // Physical keys never reach the focused app while recording.
+                // Injected or own events still pass so remaps and macros are
+                // not broken by an open session.
+                return meta.accepted;
+            }
+        }
+
+        if !is_down && capture.take_key_up(vk) {
+            return true;
+        }
+        drop(capture);
+
+        if !meta.accepted {
+            return false;
         }
         self.handle_keyboard(vk, is_down)
-    }
-
-    /// Shortcut capture swallows every key except Escape so the combination can
-    /// be recorded without leaking into the focused app.
-    fn capture_key(&self, vk: u16, is_down: bool) -> bool {
-        if !is_down {
-            return true;
-        }
-
-        if vk == 0x1B {
-            self.capture
-                .store(CaptureMode::None as u8, Ordering::SeqCst);
-            let _ = self.app.emit("input://capture", json!({ "kind": "cancel" }));
-            return true;
-        }
-
-        if keys::is_modifier_vk(vk) {
-            let held = Self::pressed_modifiers();
-            let _ = self.app.emit(
-                "input://capture",
-                json!({ "kind": "modifiers", "keys": held }),
-            );
-            return true;
-        }
-
-        let mut combo = Self::pressed_modifiers();
-        combo.push(keys::name_from_vk(vk));
-        let combo = keys::normalize_combo(&combo);
-        self.capture
-            .store(CaptureMode::None as u8, Ordering::SeqCst);
-        let _ = self.app.emit(
-            "input://capture",
-            json!({ "kind": "keys", "keys": combo }),
-        );
-        true
     }
 
     /// Matches a physical key against the profile's keyboard mappings. Returns

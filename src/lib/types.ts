@@ -168,8 +168,41 @@ export interface Settings {
   keyboard: KeyboardSettings;
 }
 
-export interface InputSample {
-  ageMs: number;
+export type CaptureKind = "mouse" | "keyboard";
+export type CaptureDecision = "selected" | "seen" | "filtered" | "own";
+
+export interface CaptureEvent {
+  seq: number;
+  atMs: number;
+  source: "mouse" | "keyboard";
+  kind: "down" | "up" | "wheel";
+  button: MouseButton | null;
+  direction: ScrollDirection | null;
+  vk: number | null;
+  token: string | null;
+  modifiers: string[];
+  injected: boolean;
+  own: boolean;
+  repeat: boolean;
+  decision: CaptureDecision;
+}
+
+export interface CaptureSessionInfo {
+  id: number;
+  events: CaptureEvent[];
+}
+
+/** Props shared by every control that can start/stop a capture session. */
+export interface CaptureControl {
+  recording: boolean;
+  ready: boolean;
+  events: CaptureEvent[];
+  onToggle: () => void;
+  /** Keep the last log visible after Stop, until the session value changes. */
+  showLog?: boolean;
+}
+
+export interface InputSample {  ageMs: number;
   kind: "wheel" | "down" | "up";
   direction: string | null;
   button: string | null;
