@@ -180,7 +180,7 @@ export function CaptureLog({
           {entries.length > 0
             ? `${entries.length} gesture${entries.length === 1 ? "" : "s"}`
             : active
-              ? "Esc to stop"
+              ? "Esc to stop · 20 s limit"
               : ""}
         </span>
       </div>
