@@ -7,7 +7,9 @@ export type Trigger =
   | { type: "longPress" }
   | { type: "release" }
   | { type: "withButton"; button: MouseButton }
-  | { type: "withWheel"; direction: ScrollDirection };
+  | { type: "withWheel"; direction: ScrollDirection }
+  /** A bare wheel notch, with no button held. */
+  | { type: "wheel"; direction: ScrollDirection };
 
 export type Action =
   | { type: "shortcut"; keys: string[] }
@@ -58,13 +60,23 @@ export type MacroStep =
 
 export type MacroStepType = MacroStep["type"];
 
+export interface WheelOptions {
+  /** Ignore further notches for this long after firing. */
+  cooldownMs: number;
+  /** Run the action and still send the original scroll to the app. */
+  alsoScroll: boolean;
+}
+
 export interface Mapping {
   id: string;
   name: string | null;
-  button: MouseButton;
+  /** `null` for standalone wheel triggers, which have no button. */
+  button: MouseButton | null;
   trigger: Trigger;
   action: Action;
   enabled: boolean;
+  /** Only meaningful for a `wheel` trigger; `null` uses the defaults. */
+  wheel: WheelOptions | null;
 }
 
 export interface Layer {
@@ -286,13 +298,18 @@ export function newLayer(activator: MouseButton = "x2"): Layer {
   };
 }
 
-export function newMapping(button: MouseButton = "x2"): Mapping {
+export function newMapping(button: MouseButton | null = "x2"): Mapping {
   return {
     id: "",
     name: null,
     button,
-    trigger: { type: "singleClick" },
+    trigger:
+      button === null
+        ? { type: "wheel", direction: "up" }
+        : { type: "singleClick" },
     action: { type: "shortcut", keys: [] },
     enabled: true,
+    wheel:
+      button === null ? { cooldownMs: 80, alsoScroll: false } : null,
   };
 }

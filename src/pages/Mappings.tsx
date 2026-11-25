@@ -38,7 +38,7 @@ export function MappingsPage() {
   const { snapshot, runSnapshot, setView } = useApp();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<Mapping | null>(null);
-  const [initialButton, setInitialButton] = useState<MouseButton>("x2");
+  const [initialButton, setInitialButton] = useState<MouseButton | null>("x2");
   const [deleteTarget, setDeleteTarget] = useState<Mapping | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -98,8 +98,8 @@ export function MappingsPage() {
       mapping.trigger.type === "withButton",
   ).length;
 
-  const openNew = (button?: MouseButton) => {
-    setInitialButton(button ?? "x2");
+  const openNew = (button: MouseButton | null = "x2") => {
+    setInitialButton(button);
     setEditing(null);
     setEditorOpen(true);
   };
@@ -291,27 +291,39 @@ export function MappingsPage() {
               </button>
             </div>
           )}
-          {MOUSE_BUTTONS.map((button) => {
-            const group = visible.filter((mapping) => mapping.button === button);
-            if (group.length === 0) return null;
-            return (
-              <section key={button}>
+          {[
+            ...MOUSE_BUTTONS.map((button) => ({
+              key: button as string,
+              label: `${buttonLabel(button)} button`,
+              button: button as MouseButton | null,
+              items: visible.filter((mapping) => mapping.button === button),
+            })),
+            {
+              key: "wheel",
+              label: "Scroll wheel",
+              button: null as MouseButton | null,
+              items: visible.filter((mapping) => mapping.button === null),
+            },
+          ]
+            .filter((group) => group.items.length > 0)
+            .map((group) => (
+              <section key={group.key}>
                 <div className="mb-2 flex items-center gap-2 px-0.5">
                   <span className="text-[12px] font-semibold">
-                    {buttonLabel(button)} button
+                    {group.label}
                   </span>
                   <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                    {group.length}
+                    {group.items.length}
                   </span>
                   <button
-                    onClick={() => openNew(button)}
+                    onClick={() => openNew(group.button)}
                     className="focus-ring ml-auto flex items-center gap-1 rounded text-[11px] font-medium text-zinc-400 transition hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-200"
                   >
                     <Plus className="size-3" /> Add
                   </button>
                 </div>
                 <div className="surface divide-y divide-zinc-100 overflow-hidden rounded-2xl dark:divide-white/[0.055]">
-                  {group.map((mapping) => (
+                  {group.items.map((mapping) => (
                     <div
                       key={mapping.id}
                       className={cn(
@@ -396,8 +408,7 @@ export function MappingsPage() {
                   ))}
                 </div>
               </section>
-            );
-          })}
+            ))}
 
           <div className="flex items-center justify-between rounded-xl border border-dashed border-zinc-200 px-4 py-3 dark:border-white/[0.08]">
             <div className="flex items-center gap-2 text-[11.5px] text-secondary">

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
 
 /// Media keys are sent as their dedicated virtual-key codes. Keeping the list
@@ -236,6 +236,9 @@ pub enum Trigger {
     Release,
     WithButton { button: MouseButton },
     WithWheel { direction: ScrollDirection },
+    /// A physical wheel notch with no button held. These mappings have no
+    /// `Mapping::button`, so they are matched by direction alone.
+    Wheel { direction: ScrollDirection },
 }
 
 
@@ -314,15 +317,47 @@ impl Action {
 }
 
 
+/// Extra behaviour for standalone wheel triggers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WheelOptions {
+    /// Ignore further notches for this long after firing, so a high-resolution
+    /// or free-spinning wheel does not run the action many times per flick.
+    pub cooldown_ms: u64,
+    /// Run the action and still send the original scroll to the foreground app.
+    pub also_scroll: bool,
+}
+
+impl Default for WheelOptions {
+    fn default() -> Self {
+        Self {
+            cooldown_ms: 80,
+            also_scroll: false,
+        }
+    }
+}
+
+impl WheelOptions {
+    pub fn sanitize(&mut self) {
+        self.cooldown_ms = self.cooldown_ms.min(1_000);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mapping {
     pub id: String,
     pub name: Option<String>,
-    pub button: MouseButton,
+    /// The button this mapping is attached to. `None` for standalone wheel
+    /// mappings, which are matched by direction instead.
+    #[serde(default)]
+    pub button: Option<MouseButton>,
     pub trigger: Trigger,
     pub action: Action,
     pub enabled: bool,
+    /// Only meaningful for [`Trigger::Wheel`]. `None` uses the defaults.
+    #[serde(default)]
+    pub wheel: Option<WheelOptions>,
 }
 
 impl Mapping {
@@ -330,15 +365,31 @@ impl Mapping {
         Self {
             id: Uuid::new_v4().to_string(),
             name: None,
-            button,
+            button: Some(button),
             trigger,
             action,
             enabled: true,
+            wheel: None,
+        }
+    }
+
+    /// A standalone wheel mapping, fired by a physical wheel notch with no
+    /// button held.
+    #[allow(dead_code)]
+    pub fn wheel(direction: ScrollDirection, action: Action) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: None,
+            button: None,
+            trigger: Trigger::Wheel { direction },
+            action,
+            enabled: true,
+            wheel: Some(WheelOptions::default()),
         }
     }
 
     pub fn matches(&self, button: MouseButton, trigger: &Trigger) -> bool {
-        self.enabled && self.button == button && &self.trigger == trigger
+        self.enabled && self.button == Some(button) && &self.trigger == trigger
     }
 }
 
@@ -839,6 +890,22 @@ fn sanitize_mappings(
         }
         mapping_ids.push(mapping.id.clone());
 
+        // A standalone wheel trigger owns no button, and a button trigger is
+        // meaningless without one. Repair hand-edited or imported combinations
+        // instead of letting a mapping that can never fire sit in the list.
+        if matches!(mapping.trigger, Trigger::Wheel { .. }) {
+            mapping.button = None;
+            mapping
+                .wheel
+                .get_or_insert_with(WheelOptions::default)
+                .sanitize();
+        } else {
+            if mapping.button.is_none() {
+                return false;
+            }
+            mapping.wheel = None;
+        }
+
         match &mut mapping.action {
             Action::Shortcut { keys } | Action::HoldKeys { keys } => {
                 sanitize_key_list(keys, 8)
@@ -1023,6 +1090,74 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(config.schema_version, SCHEMA_VERSION);
         assert!(config.settings.onboarded);
+    }
+
+    #[test]
+    fn wheel_mappings_round_trip_without_a_button() {
+        let mut config = AppConfig::default();
+        let mut wheel = Mapping::wheel(
+            ScrollDirection::Left,
+            Action::Shortcut {
+                keys: vec!["alt".into(), "left".into()],
+            },
+        );
+        wheel.wheel = Some(WheelOptions {
+            cooldown_ms: 99_999,
+            also_scroll: true,
+        });
+        let id = wheel.id.clone();
+        config.active_profile_mut().unwrap().mappings.push(wheel);
+
+        let notes = config.sanitize();
+        assert!(notes.is_empty(), "{notes:?}");
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"direction\":\"left\""));
+        assert!(json.contains("\"cooldownMs\":1000"));
+
+        let mut back: AppConfig = serde_json::from_str(&json).unwrap();
+        back.sanitize();
+        let mapping = back
+            .active_profile()
+            .unwrap()
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == id)
+            .unwrap();
+        assert_eq!(mapping.button, None);
+        assert_eq!(
+            mapping.trigger,
+            Trigger::Wheel {
+                direction: ScrollDirection::Left
+            }
+        );
+    }
+
+    #[test]
+    fn sanitize_repairs_button_and_wheel_trigger_mismatches() {
+        let mut config = AppConfig::default();
+        let mut stray_button = Mapping::new(
+            MouseButton::X1,
+            Trigger::Wheel {
+                direction: ScrollDirection::Up,
+            },
+            Action::None,
+        );
+        stray_button.button = Some(MouseButton::X1);
+        let mut buttonless = Mapping::new(MouseButton::X1, Trigger::SingleClick, Action::None);
+        buttonless.button = None;
+
+        let profile = config.active_profile_mut().unwrap();
+        profile.mappings.push(stray_button);
+        profile.mappings.push(buttonless);
+
+        config.sanitize();
+        let mappings = &config.active_profile().unwrap().mappings;
+        assert!(mappings
+            .iter()
+            .any(|mapping| mapping.button.is_none() && matches!(mapping.trigger, Trigger::Wheel { .. })));
+        assert!(!mappings.iter().any(|mapping| mapping.button.is_none()
+            && !matches!(mapping.trigger, Trigger::Wheel { .. })));
     }
 
     #[test]

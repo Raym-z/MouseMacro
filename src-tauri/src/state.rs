@@ -6,7 +6,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::model::{
     is_media_key, Action, AppConfig, ExceptionMode, ExceptionRule, Layer, MacroStep, Mapping,
-    Profile, Settings, Theme, Trigger,
+    Profile, Settings, Theme, Trigger, WheelOptions,
 };
 use crate::config::store::ConfigStore;
 use crate::engine::keys::{normalize_combo, vk_from_name};
@@ -864,8 +864,25 @@ pub fn validate_mapping(mapping: &mut Mapping) -> Result<(), String> {
     if mapping.name.as_ref().is_some_and(|name| name.chars().count() > 60) {
         return Err("Mapping labels can be at most 60 characters.".into());
     }
+    match &mapping.trigger {
+        Trigger::Wheel { .. } => {
+            if mapping.button.is_some() {
+                return Err("A scroll wheel trigger does not use a mouse button.".into());
+            }
+            mapping
+                .wheel
+                .get_or_insert_with(WheelOptions::default)
+                .sanitize();
+        }
+        _ => {
+            if mapping.button.is_none() {
+                return Err("Choose a mouse button for this mapping.".into());
+            }
+            mapping.wheel = None;
+        }
+    }
     if let Trigger::WithButton { button } = &mapping.trigger {
-        if *button == mapping.button {
+        if Some(*button) == mapping.button {
             return Err("A button combination needs a second, different button.".into());
         }
     }

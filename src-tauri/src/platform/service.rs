@@ -823,12 +823,20 @@ impl EngineService {
                         (
                             InputEvent::Wheel {
                                 direction: target,
+                                notches,
                                 time,
                             },
                             Some((settings, target, notches)),
                         )
                     }
-                    _ => (InputEvent::Wheel { direction, time }, None),
+                    _ => (
+                        InputEvent::Wheel {
+                            direction,
+                            notches,
+                            time,
+                        },
+                        None,
+                    ),
                 }
             }
         };
@@ -983,6 +991,20 @@ impl EngineService {
                         crate::engine::ReplayDirection::Down
                     );
                     if let Err(error) = simulate::replay_button(button, down) {
+                        self.executor.finish(Err(error));
+                    }
+                }
+                Effect::ReplayScroll { direction, notches } => {
+                    // Re-use the same speed/acceleration the physical path would
+                    // have applied. `wheel_multiplier` is only reached here when
+                    // the event was consumed, so acceleration is counted once.
+                    let multiplier = self
+                        .effective_scroll()
+                        .filter(|settings| !settings.is_identity())
+                        .map(|settings| self.wheel_multiplier(&settings))
+                        .unwrap_or(1);
+                    let delta = 120 * notches.max(1) * multiplier;
+                    if let Err(error) = simulate::scroll_raw(direction, delta) {
                         self.executor.finish(Err(error));
                     }
                 }

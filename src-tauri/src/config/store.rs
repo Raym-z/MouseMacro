@@ -352,14 +352,14 @@ mod tests {
         let dir = temp_dir("roundtrip");
         let store = ConfigStore::new(dir.clone()).unwrap();
         let mut config = AppConfig::default();
-        config.active_profile_mut().unwrap().mappings[0].button = MouseButton::X1;
+        config.active_profile_mut().unwrap().mappings[0].button = Some(MouseButton::X1);
         store.save(&config).unwrap();
 
         let loaded = store.load();
         assert!(loaded.warning.is_none());
         assert_eq!(
             loaded.config.active_profile().unwrap().mappings[0].button,
-            MouseButton::X1
+            Some(MouseButton::X1)
         );
 
         let _ = fs::remove_dir_all(dir);

@@ -102,12 +102,12 @@ export function keysLabel(keys: string[]): string {
   return keys.map(keyLabel).join(" + ");
 }
 
-export function buttonLabel(button: MouseButton): string {
-  return BUTTON_LABEL[button];
+export function buttonLabel(button: MouseButton | null): string {
+  return button === null ? "Wheel" : BUTTON_LABEL[button];
 }
 
-export function buttonName(button: MouseButton): string {
-  return BUTTON_NAME[button];
+export function buttonName(button: MouseButton | null): string {
+  return button === null ? "scroll wheel" : BUTTON_NAME[button];
 }
 
 export function isModifier(key: string): boolean {
@@ -132,10 +132,15 @@ export function triggerLabel(trigger: Trigger): string {
       return `+ ${buttonLabel(trigger.button)}`;
     case "withWheel":
       return `+ Scroll ${trigger.direction}`;
+    case "wheel":
+      return `Scroll ${trigger.direction}`;
   }
 }
 
 export function triggerDescription(mapping: Mapping): string {
+  if (mapping.trigger.type === "wheel") {
+    return `Scroll ${mapping.trigger.direction} with no button held`;
+  }
   const button = buttonLabel(mapping.button);
   switch (mapping.trigger.type) {
     case "singleClick":
@@ -280,26 +285,28 @@ export const RULE_CATEGORY_HINT: Record<RuleCategory, string> = {
   singleClick: "A quick press and release",
 };
 
-const BUTTON_ORDER: Record<MouseButton, number> = {
+const BUTTON_ORDER: Record<MouseButton | "wheel", number> = {
   left: 0,
   right: 1,
   middle: 2,
   x1: 3,
   x2: 4,
+  wheel: 5,
 };
 
 const TRIGGER_ORDER: Record<Trigger["type"], number> = {
   withButton: 0,
   withWheel: 1,
-  longPress: 2,
-  doubleClick: 3,
-  release: 4,
-  singleClick: 5,
+  wheel: 2,
+  longPress: 3,
+  doubleClick: 4,
+  release: 5,
+  singleClick: 6,
 };
 
 export function sortMappings(mappings: Mapping[]): Mapping[] {
   return [...mappings].sort((a, b) => {
-    const button = BUTTON_ORDER[a.button] - BUTTON_ORDER[b.button];
+    const button = BUTTON_ORDER[a.button ?? "wheel"] - BUTTON_ORDER[b.button ?? "wheel"];
     if (button !== 0) return button;
     return TRIGGER_ORDER[a.trigger.type] - TRIGGER_ORDER[b.trigger.type];
   });
@@ -311,6 +318,8 @@ export function triggerKey(trigger: Trigger): string {
       return `withButton:${trigger.button}`;
     case "withWheel":
       return `withWheel:${trigger.direction}`;
+    case "wheel":
+      return `wheel:${trigger.direction}`;
     default:
       return trigger.type;
   }
@@ -326,7 +335,7 @@ export function shadowedMappingIds(mappings: Mapping[]): Set<string> {
   const shadowed = new Set<string>();
   for (const mapping of mappings) {
     if (!mapping.enabled) continue;
-    const key = `${mapping.button}:${triggerKey(mapping.trigger)}`;
+    const key = `${mapping.button ?? "wheel"}:${triggerKey(mapping.trigger)}`;
     if (seen.has(key)) {
       shadowed.add(mapping.id);
     } else {
@@ -357,6 +366,17 @@ export function countByButton(
 }
 
 export function validateMapping(mapping: Mapping): string | null {
+  if (mapping.trigger.type === "wheel") {
+    if (mapping.button !== null) {
+      return "A scroll wheel trigger does not use a mouse button.";
+    }
+    const cooldown = mapping.wheel?.cooldownMs ?? 80;
+    if (!Number.isFinite(cooldown) || cooldown < 0 || cooldown > 1_000) {
+      return "Cooldown must be between 0 and 1000 ms.";
+    }
+  } else if (mapping.button === null) {
+    return "Choose a mouse button for this mapping.";
+  }
   if (mapping.trigger.type === "withButton" && mapping.trigger.button === mapping.button) {
     return "Choose a different second button for the combination.";
   }

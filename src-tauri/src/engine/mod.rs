@@ -17,15 +17,20 @@
 pub mod keys;
 
 use crate::config::model::{
-    Action, Layer, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger,
+    Action, Layer, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger, WheelOptions,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
     ButtonDown { button: MouseButton, time: u64 },
     ButtonUp { button: MouseButton, time: u64 },
-    Wheel { direction: ScrollDirection, time: u64 },
+    Wheel {
+        direction: ScrollDirection,
+        /// Physical notches in this event, at least 1.
+        notches: i32,
+        time: u64,
+    },
     Tick { time: u64 },
 }
 
@@ -61,6 +66,12 @@ pub enum Effect {
     Replay {
         button: MouseButton,
         direction: ReplayDirection,
+    },
+    /// Send the physical wheel notch on to the foreground app even though a
+    /// mapping consumed it (`WheelOptions::also_scroll`).
+    ReplayScroll {
+        direction: ScrollDirection,
+        notches: i32,
     },
 }
 
@@ -174,6 +185,8 @@ pub struct InputEngine {
     chord_consumed: Vec<MouseButton>,
     consumed_until_up: Vec<ConsumedUntilUp>,
     active_layers: Vec<ActiveLayer>,
+    /// Last fire time per standalone wheel mapping id, for its cooldown.
+    wheel_fired: HashMap<String, u64>,
     seq: u64,
 }
 
@@ -186,6 +199,7 @@ impl InputEngine {
             chord_consumed: Vec::new(),
             consumed_until_up: Vec::new(),
             active_layers: Vec::new(),
+            wheel_fired: HashMap::new(),
             seq: 0,
         }
     }
@@ -201,6 +215,7 @@ impl InputEngine {
         self.chord_consumed.clear();
         self.consumed_until_up.clear();
         self.active_layers.clear();
+        self.wheel_fired.clear();
         self.config = config;
         effects
     }
@@ -257,8 +272,12 @@ impl InputEngine {
             InputEvent::ButtonUp { button, time } => {
                 self.on_button_up(button, time, &mut outcome);
             }
-            InputEvent::Wheel { direction, .. } => {
-                self.on_wheel(direction, &mut outcome);
+            InputEvent::Wheel {
+                direction,
+                notches,
+                time,
+            } => {
+                self.on_wheel(direction, notches, time, &mut outcome);
             }
             InputEvent::Tick { time } => {
                 self.on_tick(time, &mut outcome);
@@ -510,7 +529,13 @@ impl InputEngine {
         }
     }
 
-    fn on_wheel(&mut self, direction: ScrollDirection, outcome: &mut Outcome) {
+    fn on_wheel(
+        &mut self,
+        direction: ScrollDirection,
+        notches: i32,
+        time: u64,
+        outcome: &mut Outcome,
+    ) {
         for index in (0..self.held.len()).rev() {
             let button = self.held[index].button;
             let mapping = self
@@ -545,6 +570,64 @@ impl InputEngine {
                 return;
             }
         }
+
+        // No gesture matched: a bare wheel notch may still be a trigger of its
+        // own. The physical notch is always consumed while a standalone trigger
+        // matches, unless the mapping also asks to scroll.
+        let Some(mapping) = self.find_standalone_wheel(direction).cloned() else {
+            return;
+        };
+        outcome.suppress = true;
+
+        let defaults = WheelOptions::default();
+        let cooldown_ms = mapping
+            .wheel
+            .as_ref()
+            .map_or(defaults.cooldown_ms, |options| options.cooldown_ms);
+        let also_scroll = mapping
+            .wheel
+            .as_ref()
+            .map_or(defaults.also_scroll, |options| options.also_scroll);
+        if also_scroll {
+            outcome.effects.push(Effect::ReplayScroll {
+                direction,
+                notches: notches.max(1),
+            });
+        }
+
+        let cooling = self
+            .wheel_fired
+            .get(&mapping.id)
+            .is_some_and(|last| time.saturating_sub(*last) < cooldown_ms);
+        if cooling {
+            return;
+        }
+        self.wheel_fired.insert(mapping.id.clone(), time);
+        self.run_action(&mapping, &mut outcome.effects);
+    }
+
+    /// First enabled standalone wheel mapping for `direction`, layers first so
+    /// a held layer can override the profile without duplicating the mapping.
+    fn find_standalone_wheel(&self, direction: ScrollDirection) -> Option<&Mapping> {
+        let trigger = Trigger::Wheel { direction };
+        for active in self.active_layers.iter().rev() {
+            let Some(layer) = self
+                .config
+                .layers
+                .iter()
+                .find(|layer| layer.enabled && layer.id == active.id)
+            else {
+                continue;
+            };
+            if let Some(mapping) = layer.mappings.iter().find(|mapping| {
+                mapping.enabled && mapping.button.is_none() && mapping.trigger == trigger
+            }) {
+                return Some(mapping);
+            }
+        }
+        self.config.mappings.iter().find(|mapping| {
+            mapping.enabled && mapping.button.is_none() && mapping.trigger == trigger
+        })
     }
 
     fn on_tick(&mut self, time: u64, outcome: &mut Outcome) {
@@ -650,7 +733,7 @@ impl InputEngine {
             .config
             .mappings
             .iter()
-            .any(|mapping| mapping.enabled && mapping.button == button)
+            .any(|mapping| mapping.enabled && mapping.button == Some(button))
         {
             return true;
         }
@@ -667,7 +750,7 @@ impl InputEngine {
                     layer
                         .mappings
                         .iter()
-                        .any(|mapping| mapping.enabled && mapping.button == button)
+                        .any(|mapping| mapping.enabled && mapping.button == Some(button))
                 })
         })
     }
@@ -773,7 +856,9 @@ impl EngineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::{Action, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger};
+    use crate::config::model::{
+        Action, Mapping, MouseButton, RuleCategory, ScrollDirection, Trigger, WheelOptions,
+    };
 
     fn shortcut(keys: &[&str]) -> Action {
         Action::Shortcut {
@@ -790,6 +875,12 @@ mod tests {
     fn mapping(button: MouseButton, trigger: Trigger, action: Action) -> Mapping {
         let mut mapping = Mapping::new(button, trigger, action);
         mapping.id = format!("m{}", uuid::Uuid::new_v4());
+        mapping
+    }
+
+    fn wheel_mapping(direction: ScrollDirection, action: Action) -> Mapping {
+        let mut mapping = Mapping::wheel(direction, action);
+        mapping.id = format!("w{}", uuid::Uuid::new_v4());
         mapping
     }
 
@@ -842,7 +933,11 @@ mod tests {
     }
 
     fn wheel(engine: &mut InputEngine, direction: ScrollDirection, time: u64) -> Outcome {
-        engine.handle(InputEvent::Wheel { direction, time })
+        engine.handle(InputEvent::Wheel {
+            direction,
+            notches: 1,
+            time,
+        })
     }
 
     fn tick(engine: &mut InputEngine, time: u64) -> Outcome {
@@ -1614,6 +1709,154 @@ mod tests {
         assert!(layered.suppress);
         assert_eq!(runs(&layered), vec![&shortcut(&["alt", "up"])]);
         assert!(!up(&mut engine, MouseButton::X2, 1_100).suppress);
+    }
+
+    #[test]
+    fn standalone_wheel_trigger_runs_and_consumes_the_notch() {
+        let action = shortcut(&["ctrl", "equal"]);
+        let mut engine = engine(vec![wheel_mapping(ScrollDirection::Up, action.clone())]);
+
+        let outcome = wheel(&mut engine, ScrollDirection::Up, 1_000);
+        assert!(outcome.suppress, "a matching wheel trigger consumes the notch");
+        assert_eq!(runs(&outcome), vec![&action]);
+    }
+
+    #[test]
+    fn unmatched_wheel_direction_still_passes_through() {
+        let mut engine = engine(vec![wheel_mapping(
+            ScrollDirection::Up,
+            shortcut(&["ctrl", "equal"]),
+        )]);
+
+        let outcome = wheel(&mut engine, ScrollDirection::Down, 1_000);
+        assert!(!outcome.suppress);
+        assert!(outcome.effects.is_empty());
+    }
+
+    #[test]
+    fn horizontal_standalone_wheel_triggers_work() {
+        let left = shortcut(&["alt", "left"]);
+        let right = shortcut(&["alt", "right"]);
+        let mut engine = engine(vec![
+            wheel_mapping(ScrollDirection::Left, left.clone()),
+            wheel_mapping(ScrollDirection::Right, right.clone()),
+        ]);
+
+        let tilt_left = wheel(&mut engine, ScrollDirection::Left, 1_000);
+        assert!(tilt_left.suppress);
+        assert_eq!(runs(&tilt_left), vec![&left]);
+
+        let tilt_right = wheel(&mut engine, ScrollDirection::Right, 2_000);
+        assert!(tilt_right.suppress);
+        assert_eq!(runs(&tilt_right), vec![&right]);
+    }
+
+    #[test]
+    fn button_wheel_gesture_beats_a_standalone_trigger() {
+        let gesture = shortcut(&["alt", "up"]);
+        let standalone = shortcut(&["ctrl", "up"]);
+        let mut engine = engine(vec![
+            mapping(
+                MouseButton::X2,
+                Trigger::WithWheel {
+                    direction: ScrollDirection::Up,
+                },
+                gesture.clone(),
+            ),
+            wheel_mapping(ScrollDirection::Up, standalone),
+        ]);
+
+        down(&mut engine, MouseButton::X2, 1_000);
+        let outcome = wheel(&mut engine, ScrollDirection::Up, 1_050);
+        assert!(outcome.suppress);
+        assert_eq!(runs(&outcome), vec![&gesture]);
+    }
+
+    #[test]
+    fn layer_standalone_wheel_overrides_the_profile() {
+        let profile = shortcut(&["ctrl", "up"]);
+        let layered = shortcut(&["alt", "up"]);
+        let mut engine = engine_with_layers(
+            vec![wheel_mapping(ScrollDirection::Up, profile.clone())],
+            vec![layer(
+                MouseButton::X2,
+                vec![wheel_mapping(ScrollDirection::Up, layered.clone())],
+            )],
+        );
+
+        let before = wheel(&mut engine, ScrollDirection::Up, 1_000);
+        assert_eq!(runs(&before), vec![&profile]);
+
+        down(&mut engine, MouseButton::X2, 1_100);
+        let during = wheel(&mut engine, ScrollDirection::Up, 1_150);
+        assert_eq!(runs(&during), vec![&layered]);
+    }
+
+    #[test]
+    fn wheel_cooldown_consumes_repeats_without_rerunning() {
+        let action = shortcut(&["ctrl", "equal"]);
+        let mut mapping = wheel_mapping(ScrollDirection::Up, action.clone());
+        mapping.wheel = Some(WheelOptions {
+            cooldown_ms: 80,
+            also_scroll: false,
+        });
+        let mut engine = engine(vec![mapping]);
+
+        let first = wheel(&mut engine, ScrollDirection::Up, 1_000);
+        assert_eq!(runs(&first), vec![&action]);
+
+        let second = wheel(&mut engine, ScrollDirection::Up, 1_050);
+        assert!(second.suppress, "a cooling notch is still consumed");
+        assert!(runs(&second).is_empty(), "but the action must not rerun");
+
+        let third = wheel(&mut engine, ScrollDirection::Up, 1_100);
+        assert_eq!(runs(&third), vec![&action]);
+    }
+
+    #[test]
+    fn also_scroll_replays_the_notch_alongside_the_action() {
+        let action = shortcut(&["volumeup"]);
+        let mut mapping = wheel_mapping(ScrollDirection::Up, action.clone());
+        mapping.wheel = Some(WheelOptions {
+            cooldown_ms: 0,
+            also_scroll: true,
+        });
+        let mut engine = engine(vec![mapping]);
+
+        let outcome = engine.handle(InputEvent::Wheel {
+            direction: ScrollDirection::Up,
+            notches: 2,
+            time: 1_000,
+        });
+        assert!(outcome.suppress);
+        assert_eq!(runs(&outcome), vec![&action]);
+        match &outcome.effects[0] {
+            Effect::ReplayScroll { direction, notches } => {
+                assert_eq!(*direction, ScrollDirection::Up);
+                assert_eq!(*notches, 2);
+            }
+            other => panic!("expected the scroll replay first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn also_scroll_keeps_scrolling_while_cooling_down() {
+        let action = shortcut(&["volumeup"]);
+        let mut mapping = wheel_mapping(ScrollDirection::Up, action.clone());
+        mapping.wheel = Some(WheelOptions {
+            cooldown_ms: 500,
+            also_scroll: true,
+        });
+        let mut engine = engine(vec![mapping]);
+
+        let _ = wheel(&mut engine, ScrollDirection::Up, 1_000);
+        let cooling = wheel(&mut engine, ScrollDirection::Up, 1_100);
+        assert!(cooling.suppress);
+        assert!(runs(&cooling).is_empty());
+        assert!(
+            matches!(cooling.effects.as_slice(), [Effect::ReplayScroll { .. }]),
+            "the notch must still reach the app while the action is cooling"
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ import {
   type MouseButton,
   type ScrollDirection,
   type Trigger,
+  type WheelOptions,
 } from "../lib/types";
 import {
   actionLabel,
@@ -56,7 +57,7 @@ interface MappingSheetProps {
   /** When set, the mapping belongs to a held-button layer. */
   layerId?: string;
   mapping: Mapping | null;
-  initialButton?: MouseButton;
+  initialButton?: MouseButton | null;
   onClose: () => void;
   onRequestDelete: (mapping: Mapping) => void;
 }
@@ -108,6 +109,7 @@ const TRIGGER_TYPES: Array<{ value: Trigger["type"]; label: string }> = [
   { value: "release", label: "On button release" },
   { value: "withButton", label: "Button + another button" },
   { value: "withWheel", label: "Button + scroll wheel" },
+  { value: "wheel", label: "Scroll wheel (no button)" },
 ];
 
 const ACTION_TYPES: Array<{ value: Action["type"]; label: string }> = [
@@ -151,8 +153,12 @@ export function MappingSheet({
 }: MappingSheetProps) {
   const { applySnapshot } = useApp();
   const { toast } = useToast();
-  const [button, setButton] = useState<MouseButton>("x2");
+  const [button, setButton] = useState<MouseButton | null>("x2");
   const [trigger, setTrigger] = useState<Trigger>({ type: "singleClick" });
+  const [wheel, setWheel] = useState<WheelOptions>({
+    cooldownMs: 80,
+    alsoScroll: false,
+  });
   const [action, setAction] = useState<Action>(defaultAction("shortcut"));
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -169,10 +175,11 @@ export function MappingSheet({
       setCaptureTarget(null);
       return;
     }
-    const source = mapping ?? newMapping(initialButton ?? "x2");
+    const source = mapping ?? newMapping(initialButton === undefined ? "x2" : initialButton);
     setButton(source.button);
     setTrigger(source.trigger);
     setAction(source.action);
+    setWheel(source.wheel ?? { cooldownMs: 80, alsoScroll: false });
     setName(source.name ?? "");
     setEnabled(source.enabled);
     setError(null);
@@ -277,6 +284,12 @@ export function MappingSheet({
   }, [button]);
 
   const updateTriggerType = (type: Trigger["type"]) => {
+    if (type === "wheel") {
+      setButton(null);
+      setTrigger({ type, direction: "up" });
+      return;
+    }
+    if (button === null) setButton("x2");
     switch (type) {
       case "withButton":
         setTrigger({ type, button: secondButton });
@@ -291,6 +304,9 @@ export function MappingSheet({
 
   const selectButton = (candidate: MouseButton) => {
     setButton(candidate);
+    if (trigger.type === "wheel") {
+      setTrigger({ type: "singleClick" });
+    }
     if (trigger.type === "withButton" && trigger.button === candidate) {
       const other = MOUSE_BUTTONS.find((item) => item !== candidate);
       if (other) setTrigger({ type: "withButton", button: other });
@@ -298,13 +314,15 @@ export function MappingSheet({
   };
 
   const handleSave = async () => {
+    const isWheel = trigger.type === "wheel";
     const draft: Mapping = {
       id: mapping?.id ?? "",
       name: name.trim() ? name.trim() : null,
-      button,
+      button: isWheel ? null : button,
       trigger,
       action,
       enabled,
+      wheel: isWheel ? wheel : null,
     };
     const validation = validateMapping(draft);
     if (validation) {
@@ -330,13 +348,15 @@ export function MappingSheet({
   };
 
   const testAction = async () => {
+    const isWheel = trigger.type === "wheel";
     const draft: Mapping = {
       id: mapping?.id ?? "test",
       name: name.trim() ? name.trim() : null,
-      button,
+      button: isWheel ? null : button,
       trigger,
       action,
       enabled: true,
+      wheel: isWheel ? wheel : null,
     };
     const validation = validateMapping(draft);
     if (validation) {
@@ -436,8 +456,18 @@ export function MappingSheet({
         <StepSection
           index="1"
           title="Physical button"
-          hint="Which mouse button starts this mapping?"
+          hint={
+            trigger.type === "wheel"
+              ? "Bare wheel notches have no button."
+              : "Which mouse button starts this mapping?"
+          }
         >
+          {trigger.type === "wheel" ? (
+            <Callout tone="info">
+              This mapping has no physical button. The scroll wheel direction is
+              the trigger, so it fires without holding anything.
+            </Callout>
+          ) : (
           <div className="flex flex-wrap items-center gap-1.5">
             {MOUSE_BUTTONS.map((candidate) => (
               <button
@@ -472,6 +502,7 @@ export function MappingSheet({
               {captureTarget === "button" ? "Detecting…" : "Detect"}
             </Button>
           </div>
+          )}
         </StepSection>
 
         <StepSection
@@ -538,6 +569,71 @@ export function MappingSheet({
                   ]}
                 />
               </Field>
+            </div>
+          )}
+
+          {trigger.type === "wheel" && (
+            <div className="mt-3 space-y-3">
+              <Field
+                label="Wheel direction"
+                hint="Left and right are the tilt wheel, if the device has one."
+              >
+                <Segmented
+                  value={trigger.direction}
+                  onChange={(direction) =>
+                    setTrigger({ type: "wheel", direction })
+                  }
+                  options={[
+                    { value: "up", label: "Scroll up" },
+                    { value: "down", label: "Scroll down" },
+                    { value: "left", label: "Scroll left" },
+                    { value: "right", label: "Scroll right" },
+                  ]}
+                />
+              </Field>
+              <Field
+                label="Cooldown (ms)"
+                hint="Notches closer together than this are ignored, so a fast wheel does not fire the action many times."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  max={1_000}
+                  step={10}
+                  value={wheel.cooldownMs}
+                  onChange={(event) =>
+                    setWheel({
+                      ...wheel,
+                      cooldownMs: Math.max(
+                        0,
+                        Math.min(1_000, Number(event.target.value) || 0),
+                      ),
+                    })
+                  }
+                  className="focus-ring h-9 w-full rounded-[9px] border border-zinc-200 bg-white px-3 text-[12.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                />
+              </Field>
+              <label className="flex items-center justify-between gap-3 rounded-[10px] border border-zinc-200 px-3 py-2.5 dark:border-white/10">
+                <span className="text-[12px] font-medium">
+                  Also scroll
+                  <span className="mt-0.5 block text-[11px] font-normal text-secondary">
+                    Run the action and still send the scroll to the app.
+                  </span>
+                </span>
+                <Switch
+                  checked={wheel.alsoScroll}
+                  onChange={(alsoScroll) => setWheel({ ...wheel, alsoScroll })}
+                />
+              </label>
+              {!wheel.alsoScroll &&
+                (trigger.direction === "up" ||
+                  trigger.direction === "down") && (
+                  <Callout tone="warning">
+                    While this mapping is enabled, normal vertical scrolling in
+                    this direction is blocked. Turn on Also scroll, or add an
+                    application exception where scrolling matters.
+                  </Callout>
+                )}
             </div>
           )}
 
