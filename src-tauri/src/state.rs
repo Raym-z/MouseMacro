@@ -45,6 +45,13 @@ pub struct Snapshot {
     pub status: AppStatus,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledAppsScan {
+    pub apps: Vec<crate::platform::apps::InstalledApp>,
+    pub snapshot: Snapshot,
+}
+
 pub struct AppState {
     config: Mutex<AppConfig>,
     write_lock: Mutex<()>,
@@ -697,6 +704,50 @@ impl AppState {
             .find(|mapping| mapping.id == mapping_id)
             .ok_or_else(|| "That mapping no longer exists.".to_string())?;
         mapping.enabled = enabled;
+        self.commit(config, false)
+    }
+
+    /// Scans installed and running applications and refreshes the cached game
+    /// list. Called by the Exceptions page and once shortly after startup so
+    /// the default game guard works before the page is ever opened.
+    pub fn scan_installed_apps(&self) -> InstalledAppsScan {
+        self.apply_installed_apps(crate::platform::apps::list_installed_apps())
+    }
+
+    pub fn apply_installed_apps(
+        &self,
+        apps: Vec<crate::platform::apps::InstalledApp>,
+    ) -> InstalledAppsScan {
+        let games: Vec<String> = apps
+            .iter()
+            .filter(|app| app.game)
+            .map(|app| app.process.clone())
+            .collect();
+        let snapshot = self
+            .update_known_games(games)
+            .unwrap_or_else(|_| self.snapshot());
+        InstalledAppsScan { apps, snapshot }
+    }
+
+    pub fn refresh_known_games(&self) -> Snapshot {
+        self.scan_installed_apps().snapshot
+    }
+
+    pub fn update_known_games(&self, games: Vec<String>) -> Result<Snapshot, String> {
+        let mut config = self.cfg();
+        let mut next = Vec::new();
+        for game in games {
+            if let Some(game) = crate::config::model::normalize_process_name(&game) {
+                if !next.contains(&game) {
+                    next.push(game);
+                }
+            }
+        }
+        next.truncate(500);
+        if config.known_games == next {
+            return Ok(self.snapshot());
+        }
+        config.known_games = next;
         self.commit(config, false)
     }
 

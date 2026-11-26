@@ -4,6 +4,49 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.7.0] — 2026-11-26
+
+Game-aware exceptions and a safer default for anti-cheat.
+
+### Added
+
+- **Installed app discovery.** Exceptions now lists applications from the
+  Start menu, desktop shortcuts, Steam, Epic and Riot libraries, and running
+  windows — not only windows that happen to be open. Each entry is de-duplicated
+  by executable and tagged when it comes from a game library. Riot games are
+  resolved past `RiotClientServices.exe` to the real game binary (for example
+  `VALORANT-Win64-Shipping.exe`).
+- **Games are excluded by default.** A new **Pause mappings in games** switch
+  is on for new and existing installs. Detected game executables are cached in
+  `knownGames`; the engine disables mappings, keyboard remapping and wheel
+  transformations whenever one is in the foreground, even before the
+  Exceptions page has been opened.
+- **Per-game toggles.** The Exceptions page lists detected games with an
+  Excluded/Allowed switch. Allowing one stores an explicit `Always` rule, so
+  the choice survives rescans. Turning the master switch off restores normal
+  mappings for games without a rule.
+- **Mapping rows show the blast radius.** Each button and keyboard mapping
+  displays **Excluded in N apps**, which opens Exceptions. For keyboard
+  mappings the count includes **Mappings off** rules, rules with **Keyboard
+  remapping off**, and detected games.
+- The Add/Edit rule dialog has All, Games and Running filters, a taller
+  scrollable app list (about 10 rows at once), and warns when a detected game
+  is selected with a behaviour other than **Mappings off**.
+
+### Changed
+
+- Configuration schema is now **v7**. Existing configurations migrate
+  automatically: `excludeGames` defaults to `true`, and `knownGames` is filled
+  by the first scan.
+- A background scan runs shortly after startup; manual rescans are available
+  from Exceptions.
+
+### Safety
+
+- Games are matched by executable name. Anti-cheat systems can still treat
+  injected input as suspicious, so the UI recommends leaving games excluded;
+  allowing one is an explicit opt-out.
+
 ## [1.6.1] — 2026-11-26
 
 Reliability fixes for the input hooks and drag locks.

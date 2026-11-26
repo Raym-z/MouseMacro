@@ -167,6 +167,8 @@ export interface Settings {
   onboarded: boolean;
   scroll: ScrollSettings;
   keyboard: KeyboardSettings;
+  /** Pause mappings automatically while a detected game is in front. */
+  excludeGames: boolean;
 }
 
 export type CaptureKind = "mouse" | "keyboard";
@@ -225,6 +227,8 @@ export interface AppConfig {
   profiles: Profile[];
   activeProfileId: string;
   exceptions: ExceptionRule[];
+  /** Executables detected as games by the installed-app scan. */
+  knownGames: string[];
 }
 
 export interface MappingActivity {
@@ -235,6 +239,19 @@ export interface MappingActivity {
 export interface OpenApp {
   process: string;
   title: string;
+}
+
+export interface InstalledApp {
+  process: string;
+  name: string;
+  source: "running" | "startMenu" | "steam" | "epic" | "riot";
+  game: boolean;
+  running: boolean;
+}
+
+export interface InstalledAppsScan {
+  apps: InstalledApp[];
+  snapshot: Snapshot;
 }
 
 export interface BackupInfo {

@@ -248,6 +248,20 @@ pub fn list_open_apps() -> Vec<crate::platform::foreground::OpenApp> {
 }
 
 #[tauri::command]
+pub async fn scan_installed_apps(
+    state: State<'_, AppState>,
+) -> Result<crate::state::InstalledAppsScan, String> {
+    // Shortcut resolution and launcher manifests touch the disk, so keep the
+    // scan off the IPC/main thread.
+    let apps = tauri::async_runtime::spawn_blocking(
+        crate::platform::apps::list_installed_apps,
+    )
+    .await
+    .map_err(|error| format!("The installed-app scan failed: {error}"))?;
+    Ok(state.apply_installed_apps(apps))
+}
+
+#[tauri::command]
 pub fn test_action(state: State<'_, AppState>, action: Action) -> Result<(), String> {
     state.test_action(action)
 }

@@ -88,6 +88,28 @@ export function KeyboardPage() {
   const mappings = profile?.keyMappings ?? [];
   const engineOn = config.settings.enabled && !status.panicActive;
 
+  // Keyboard remapping is off when a rule says "Mappings off", when the rule
+  // has its keyboard switch on, or when the default game guard applies.
+  const keyboardExcluded = new Set<string>();
+  for (const rule of config.exceptions) {
+    if (!rule.enabled) continue;
+    if (rule.mode === "disable" || rule.keyboardDisabled) {
+      keyboardExcluded.add(rule.process);
+    }
+  }
+  if (config.settings.excludeGames) {
+    for (const game of config.knownGames) {
+      const override = config.exceptions.find(
+        (rule) => rule.process === game && rule.enabled,
+      );
+      const disabled = override
+        ? override.mode === "disable" || override.keyboardDisabled
+        : true;
+      if (disabled) keyboardExcluded.add(game);
+    }
+  }
+  const keyboardExcludedIn = keyboardExcluded.size;
+
   const patch = (
     next: Partial<typeof keyboard>,
     message?: string,
@@ -331,6 +353,17 @@ export function KeyboardPage() {
                 </div>
               </button>
               <div className="flex shrink-0 items-center gap-1">
+                {keyboardExcludedIn > 0 && (
+                  <button
+                    onClick={() => setView("exceptions")}
+                    title={`Keyboard remapping is paused in ${keyboardExcludedIn} application${keyboardExcludedIn === 1 ? "" : "s"}. Open Exceptions.`}
+                    className="focus-ring mr-1 hidden items-center gap-1 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2 py-1 text-[10.5px] font-medium text-amber-700 transition hover:bg-amber-500/10 dark:text-amber-400 sm:flex"
+                  >
+                    <ShieldAlert className="size-3" />
+                    Excluded in {keyboardExcludedIn} app
+                    {keyboardExcludedIn === 1 ? "" : "s"}
+                  </button>
+                )}
                 <Switch
                   size="sm"
                   checked={mapping.enabled}

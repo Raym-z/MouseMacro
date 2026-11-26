@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod capture;
 pub mod elevation;
 pub mod foreground;

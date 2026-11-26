@@ -11,6 +11,7 @@ import type {
   KeyMapping,
   Layer,
   Mapping,
+  InstalledAppsScan,
   MappingActivity,
   OpenApp,
   Settings,
@@ -121,6 +122,8 @@ export const api = {
   setExceptionEnabled: (ruleId: string, enabled: boolean) =>
     invoke<Snapshot>("set_exception_enabled", { ruleId, enabled }),
   listOpenApps: () => invoke<OpenApp[]>("list_open_apps"),
+  scanInstalledApps: () =>
+    invoke<InstalledAppsScan>("scan_installed_apps"),
   testAction: (action: Action) => invoke<void>("test_action", { action }),
   stopMacros: () => invoke<void>("stop_macros"),
   getMappingActivity: () =>

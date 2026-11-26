@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::engine::keys::{is_modifier_name, normalize_combo, vk_from_name};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 pub const INJECTION_TAG: usize = 0x4D4D_4D01;
 
 /// Media keys are sent as their dedicated virtual-key codes. Keeping the list
@@ -631,6 +631,10 @@ pub struct Settings {
     /// Opt-in keyboard remapping.
     #[serde(default)]
     pub keyboard: KeyboardSettings,
+    /// Pause mouse and keyboard mappings automatically while a detected game
+    /// is in the foreground. This is on for fresh installs and upgrades.
+    #[serde(default = "default_true")]
+    pub exclude_games: bool,
 }
 
 fn default_panic_hotkey() -> Vec<String> {
@@ -656,6 +660,7 @@ impl Default for Settings {
             onboarded: false,
             scroll: ScrollSettings::default(),
             keyboard: KeyboardSettings::default(),
+            exclude_games: true,
         }
     }
 }
@@ -739,6 +744,11 @@ pub struct AppConfig {
     /// Per-application overrides, matched against the foreground executable.
     #[serde(default)]
     pub exceptions: Vec<ExceptionRule>,
+    /// Executables detected as games by the installed-app scan. They are
+    /// excluded from mappings by default while `settings.exclude_games` is on;
+    /// an explicit `Always` exception rule re-allows one.
+    #[serde(default)]
+    pub known_games: Vec<String>,
 }
 
 fn current_schema() -> u32 {
@@ -818,6 +828,7 @@ impl Default for AppConfig {
             profiles,
             active_profile_id,
             exceptions: Vec::new(),
+            known_games: Vec::new(),
         }
     }
 }
@@ -951,6 +962,19 @@ impl AppConfig {
             ));
         }
         self.exceptions.truncate(100);
+
+        // Detected games power the default "pause in games" guard. Keep the
+        // cache valid and bounded even when a hand-edited config is loaded.
+        let mut games = Vec::new();
+        for process in self.known_games.drain(..) {
+            if let Some(process) = normalize_process_name(&process) {
+                if !games.contains(&process) {
+                    games.push(process);
+                }
+            }
+        }
+        self.known_games = games;
+        self.known_games.truncate(500);
 
         // Existing installs should not see the first-run wizard after upgrading.
         if migrating {
@@ -1261,6 +1285,7 @@ mod tests {
             profiles: vec![],
             active_profile_id: "missing".into(),
             exceptions: vec![],
+            known_games: vec![],
         };
         let notes = config.sanitize();
         assert!(!notes.is_empty());
@@ -1465,6 +1490,19 @@ mod tests {
         assert_eq!(config.exceptions[0].process, "chrome.exe");
         assert_eq!(config.exceptions[1].process, "photoshop.exe");
         assert_eq!(config.exceptions[1].profile_id.as_deref(), Some(profile_id.as_str()));
+    }
+
+    #[test]
+    fn known_games_are_normalized_and_deduplicated() {
+        let mut config = AppConfig::default();
+        config.known_games = vec![
+            "Game.EXE".into(),
+            r"C:\Games\game.exe".into(),
+            "".into(),
+        ];
+        config.sanitize();
+        assert_eq!(config.known_games, vec!["game.exe"]);
+        assert!(config.settings.exclude_games);
     }
 
     #[test]

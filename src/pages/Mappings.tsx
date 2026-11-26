@@ -7,6 +7,7 @@ import {
   Pencil,
   Plus,
   Search,
+  ShieldAlert,
   Trash2,
 } from "lucide-react";
 import { useApp } from "../state/AppContext";
@@ -90,6 +91,20 @@ export function MappingsPage() {
           .includes(needle),
       )
     : sorted;
+  const excludedProcesses = new Set(
+    config.exceptions
+      .filter((rule) => rule.enabled && rule.mode === "disable")
+      .map((rule) => rule.process),
+  );
+  if (config.settings.excludeGames) {
+    for (const game of config.knownGames) {
+      const override = config.exceptions.some(
+        (rule) => rule.process === game && rule.enabled,
+      );
+      if (!override) excludedProcesses.add(game);
+    }
+  }
+  const excludedIn = excludedProcesses.size;
   const enabledCount = mappings.filter((mapping) => mapping.enabled).length;
   const shadowedCount = mappings.filter((mapping) => shadowed.has(mapping.id)).length;
   const gestureCount = mappings.filter(
@@ -365,6 +380,17 @@ export function MappingsPage() {
                         </div>
                       </button>
                       <div className="flex shrink-0 items-center gap-1">
+                        {excludedIn > 0 && (
+                          <button
+                            onClick={() => setView("exceptions")}
+                            title={`This mapping is paused in ${excludedIn} application${excludedIn === 1 ? "" : "s"}. Open Exceptions.`}
+                            className="focus-ring mr-1 hidden items-center gap-1 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2 py-1 text-[10.5px] font-medium text-amber-700 transition hover:bg-amber-500/10 dark:text-amber-400 sm:flex"
+                          >
+                            <ShieldAlert className="size-3" />
+                            Excluded in {excludedIn} app
+                            {excludedIn === 1 ? "" : "s"}
+                          </button>
+                        )}
                         <Switch
                           size="sm"
                           checked={mapping.enabled}

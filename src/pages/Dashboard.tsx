@@ -23,7 +23,6 @@ import { PageHeader, SectionTitle } from "../components/PageHeader";
 import { Callout } from "../components/Callout";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
-import { Switch } from "../components/Switch";
 import { MouseButtonBadge, MouseGlyph } from "../components/MouseButtonBadge";
 import { ActionDisplay } from "../components/ActionDisplay";
 import { useCapture } from "../hooks/useCapture";
@@ -157,26 +156,13 @@ export function DashboardPage() {
           </div>
 
           <div className="flex items-center gap-3 sm:pr-2">
-            <div className="text-right">
-              <div className="text-[12px] font-medium">
-                {active ? "Enabled" : "Disabled"}
-              </div>
-              <div className="text-[11px] text-secondary">
-                Master switch
-              </div>
-            </div>
-            <Switch
-              checked={active}
-              disabled={busy}
-              onChange={toggle}
-              label="Enable MouseMacro mappings"
-            />
             <button
               onClick={toggle}
               disabled={busy}
               aria-label={active ? "Pause mappings" : "Enable mappings"}
+              title={active ? "Pause mappings" : "Enable mappings"}
               className={cn(
-                "focus-ring ml-2 grid size-[60px] place-items-center rounded-full border transition-all duration-200 active:scale-[0.97]",
+                "focus-ring grid size-[60px] place-items-center rounded-full border transition-all duration-200 active:scale-[0.97]",
                 active
                   ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 shadow-[0_0_0_6px_rgba(16,185,129,0.05)] dark:text-emerald-400"
                   : "border-zinc-200 bg-white text-zinc-400 hover:text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-500 dark:hover:text-zinc-200",

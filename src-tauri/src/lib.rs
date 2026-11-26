@@ -93,6 +93,18 @@ pub fn run() {
                 )));
             }
             crate::platform::foreground::start(engine.clone());
+
+            // Refresh the detected-game cache in the background. The default
+            // game guard reads this list, so it should be ready even if the
+            // user never opens the Exceptions page.
+            let scan_handle = handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1_200));
+                if let Some(state) = scan_handle.try_state::<AppState>() {
+                    let _ = state.refresh_known_games();
+                }
+            });
+
             crate::platform::hotkey::start(
                 handle.clone(),
                 config.settings.panic_hotkey.clone(),
@@ -159,6 +171,7 @@ pub fn run() {
             commands::delete_exception,
             commands::set_exception_enabled,
             commands::list_open_apps,
+            commands::scan_installed_apps,
             commands::test_action,
             commands::stop_macros,
             commands::get_mapping_activity,

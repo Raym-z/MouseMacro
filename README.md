@@ -39,7 +39,17 @@ runs locally: no telemetry, no network calls, no background services.
 ### Application rules (Exceptions)
 - Per-executable behaviour: pass input through untouched, or switch to another
   profile while that app is in the foreground.
-- Add from the list of open windows or type an executable name.
+- **Choose from every installed app**, not only open windows. The picker reads
+  Start-menu and desktop shortcuts, Steam, Epic and Riot libraries and running
+  processes, and can filter by All, Games or Running. Riot Client is a
+  launcher; its games (such as VALORANT) are detected by their real binary.
+- **Games are excluded by default.** Detected games pause mouse mappings,
+  keyboard remapping and wheel changes while they are in the foreground. The
+  list is refreshed at startup and from **Rescan installed apps**.
+- Toggle an individual game to allow it, or turn off **Pause mappings in
+  games**. Allowing a game is an explicit opt-out and shows a warning, because
+  anti-cheat systems can treat injected input as cheating.
+- Button-mapping rows show **Excluded in N apps** and open this page.
 - The foreground watcher also releases synthetic holds when you switch apps, so
   nothing sticks in the window you left.
 - Rules match the executable name, not a full path.
@@ -219,7 +229,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 125 engine/config/hook/capture/service tests
+npm run test:rust   # 136 engine/config/hook/capture/service/apps tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 
@@ -271,6 +281,7 @@ atomically. Shape:
     "rulePriority": ["gesture", "longPress", "doubleClick", "release", "singleClick"],
     "panicHotkey": ["ctrl", "alt", "shift", "f12"],
     "onboarded": true,
+    "excludeGames": true,
     "keyboard": {
       "enabled": false,
       "acknowledged": false
@@ -342,6 +353,7 @@ atomically. Shape:
     }
   ],
   "activeProfileId": "…",
+  "knownGames": ["game.exe"],
   "exceptions": [
     {
       "id": "…",

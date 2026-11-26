@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Gamepad2,
   Layers,
   Monitor,
   Pencil,
@@ -7,6 +8,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { useApp } from "../state/AppContext";
@@ -23,7 +25,7 @@ import { api } from "../lib/api";
 import type {
   ExceptionMode,
   ExceptionRule,
-  OpenApp,
+  InstalledApp,
   ScrollSettings,
 } from "../lib/types";
 import { cn } from "../lib/cn";
@@ -47,7 +49,7 @@ const MODE_LABEL: Record<ExceptionMode, string> = {
 };
 
 export function ExceptionsPage() {
-  const { snapshot, runSnapshot, run } = useApp();
+  const { snapshot, runSnapshot, run, applySnapshot } = useApp();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ExceptionRule | null>(null);
   const [draft, setDraft] = useState<ExceptionRule>(emptyRule());
@@ -56,9 +58,50 @@ export function ExceptionsPage() {
   const [deleteTarget, setDeleteTarget] = useState<ExceptionRule | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [apps, setApps] = useState<OpenApp[]>([]);
+  const [apps, setApps] = useState<InstalledApp[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
   const [search, setSearch] = useState("");
+  const [gameBusy, setGameBusy] = useState<string | null>(null);
+  const [gamesOpen, setGamesOpen] = useState(true);
+  const [appFilter, setAppFilter] = useState<"all" | "games" | "running">("all");
+
+  const scanApps = async () => {
+    setLoadingApps(true);
+    const result = await run(() => api.scanInstalledApps());
+    if (result) {
+      setApps(result.apps);
+      applySnapshot(result.snapshot);
+    }
+    setLoadingApps(false);
+  };
+
+  useEffect(() => {
+    void scanApps();
+    // Scan once when the page opens; the refresh button re-runs it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!editorOpen) return;
+    setSearch("");
+    setAppFilter("all");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editorOpen]);
+
+  const filteredApps = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return apps
+      .filter((app) => {
+        if (appFilter === "games" && !app.game) return false;
+        if (appFilter === "running" && !app.running) return false;
+        if (!query) return true;
+        return (
+          app.name.toLowerCase().includes(query) ||
+          app.process.toLowerCase().includes(query)
+        );
+      })
+      .slice(0, 60);
+  }, [apps, search, appFilter]);
 
   if (!snapshot) return null;
   const { config, status } = snapshot;
@@ -67,20 +110,123 @@ export function ExceptionsPage() {
   const activeRule = rules.find(
     (rule) => foreground && rule.process === foreground && rule.enabled,
   );
+  const foregroundIsGuardedGame =
+    !activeRule &&
+    foreground !== null &&
+    config.settings.excludeGames &&
+    config.knownGames.some(
+      (game) => game.toLowerCase() === foreground.toLowerCase(),
+    );
+  const detectedGames = apps.filter((app) => app.game);
+  const explicitRule = (process: string) =>
+    rules.find((rule) => rule.process === process);
+  const gameIsExcluded = (process: string) => {
+    const rule = explicitRule(process);
+    if (rule) return rule.enabled && rule.mode === "disable";
+    return config.settings.excludeGames;
+  };
+  const excludedGames = detectedGames.filter((app) =>
+    gameIsExcluded(app.process),
+  ).length;
+  const selectedIsGame =
+    draft.process.length > 0 &&
+    apps.some((app) => app.process === draft.process && app.game);
 
-  const loadApps = async () => {
-    setLoadingApps(true);
-    const result = await run(() => api.listOpenApps());
-    if (result) setApps(result);
-    setLoadingApps(false);
+  const toggleGame = async (app: InstalledApp, excluded: boolean) => {
+    const rule = explicitRule(app.process);
+    setGameBusy(app.process);
+    if (excluded) {
+      if (!rule) {
+        await runSnapshot(
+          () =>
+            api.saveException({
+              ...emptyRule(),
+              process: app.process,
+              mode: "disable",
+            }),
+          `${app.name} excluded`,
+        );
+      } else if (rule.mode === "disable") {
+        if (!rule.enabled) {
+          await runSnapshot(
+            () => api.setExceptionEnabled(rule.id, true),
+            `${app.name} excluded`,
+          );
+        }
+      } else if (config.settings.excludeGames) {
+        // Default exclusion already covers this game; drop the allow rule.
+        await runSnapshot(
+          () => api.deleteException(rule.id),
+          `${app.name} excluded`,
+        );
+      } else {
+        await runSnapshot(
+          () =>
+            api.saveException({
+              ...rule,
+              mode: "disable",
+              profileId: null,
+              enabled: true,
+            }),
+          `${app.name} excluded`,
+        );
+      }
+    } else if (!rule) {
+      if (config.settings.excludeGames) {
+        await runSnapshot(
+          () =>
+            api.saveException({
+              ...emptyRule(),
+              process: app.process,
+              mode: "always",
+            }),
+          `${app.name} allowed`,
+        );
+      }
+    } else if (rule.mode === "always") {
+      if (!rule.enabled) {
+        await runSnapshot(
+          () => api.setExceptionEnabled(rule.id, true),
+          `${app.name} allowed`,
+        );
+      }
+    } else if (config.settings.excludeGames) {
+      await runSnapshot(
+        () =>
+          api.saveException({
+            ...rule,
+            mode: "always",
+            profileId: null,
+            enabled: true,
+          }),
+        `${app.name} allowed`,
+      );
+    } else if (rule.mode === "disable") {
+      await runSnapshot(
+        () => api.deleteException(rule.id),
+        `${app.name} allowed`,
+      );
+    } else if (!rule.enabled) {
+      await runSnapshot(
+        () => api.setExceptionEnabled(rule.id, true),
+        `${app.name} allowed`,
+      );
+    }
+    setGameBusy(null);
   };
 
-  useEffect(() => {
-    if (!editorOpen) return;
-    setSearch("");
-    void loadApps();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editorOpen]);
+  const toggleGameGuard = async (excludeGames: boolean) => {
+    await runSnapshot(
+      () =>
+        api.updateSettings({
+          ...config.settings,
+          excludeGames,
+        }),
+      excludeGames
+        ? "Games are paused by default"
+        : "Games use normal mappings",
+    );
+  };
 
   const openNew = () => {
     setEditing(null);
@@ -108,7 +254,17 @@ export function ExceptionsPage() {
 
     if (draft.mode === "always") {
       if (editing) {
-        await removeRule(editing, "Rule removed — mappings apply normally");
+        await removeRule(editing, "Rule removed — default behaviour applies");
+      } else if (selectedIsGame && config.settings.excludeGames) {
+        // An explicit rule is the only way to allow a game while the game
+        // guard is on; without it the game is excluded by default.
+        setSaving(true);
+        const result = await runSnapshot(
+          () => api.saveException(draft),
+          "Game allowed — mappings can run in this game",
+        );
+        setSaving(false);
+        if (result) setEditorOpen(false);
       } else {
         setEditorOpen(false);
       }
@@ -152,18 +308,6 @@ export function ExceptionsPage() {
     setDraft({ ...draft, scroll: { ...draft.scroll, ...next } });
   };
 
-  const filteredApps = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return apps.slice(0, 40);
-    return apps
-      .filter(
-        (app) =>
-          app.process.toLowerCase().includes(query) ||
-          app.title.toLowerCase().includes(query),
-      )
-      .slice(0, 40);
-  }, [apps, search]);
-
   return (
     <div className="animate-in">
       <PageHeader
@@ -195,19 +339,147 @@ export function ExceptionsPage() {
               </>
             )}
           </Badge>
+        ) : foregroundIsGuardedGame ? (
+          <Badge tone="warning" dot>
+            Detected game · mappings paused
+          </Badge>
         ) : (
           <Badge tone="success" dot>
             Normal mappings
           </Badge>
         )}
         <button
-          onClick={() => void loadApps()}
+          onClick={() => void scanApps()}
           className="focus-ring ml-auto flex items-center gap-1 rounded text-[11.5px] font-medium text-zinc-400 transition hover:text-zinc-800 dark:hover:text-zinc-200"
         >
           <RefreshCw className={cn("size-3", loadingApps && "animate-spin")} />
-          Refresh app list
+          {loadingApps ? "Scanning installed apps…" : "Rescan installed apps"}
         </button>
       </div>
+
+      <section className="surface mb-5 rounded-2xl">
+        <div className="flex items-start gap-3 p-4">
+          <div className="grid size-9 shrink-0 place-items-center rounded-xl border border-amber-500/20 bg-amber-500/[0.08] text-amber-500">
+            <Gamepad2 className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-[13px] font-semibold">
+                Pause mappings in games
+              </h2>
+              <Badge
+                tone={
+                  detectedGames.length === 0
+                    ? "outline"
+                    : config.settings.excludeGames
+                      ? "success"
+                      : "warning"
+                }
+                dot
+              >
+                {detectedGames.length === 0
+                  ? "No games detected yet"
+                  : config.settings.excludeGames
+                    ? `${excludedGames} of ${detectedGames.length} excluded`
+                    : "Games allowed"}
+              </Badge>
+            </div>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-secondary">
+              Detected games are excluded by default. MouseMacro still needs
+              to be running, but mappings and injected input stay off while a
+              game is in front. This is the safest setting for anti-cheat.
+            </p>
+          </div>
+          <Switch
+            checked={config.settings.excludeGames}
+            onChange={(enabled) => void toggleGameGuard(enabled)}
+            label="Pause mappings in detected games"
+          />
+        </div>
+
+        {detectedGames.length > 0 && (
+          <div className="border-t border-zinc-100 px-4 py-3 dark:border-white/[0.055]">
+            <button
+              onClick={() => setGamesOpen((open) => !open)}
+              className="focus-ring flex w-full items-center gap-2 rounded text-left"
+            >
+              <span className="text-[11.5px] font-semibold">
+                Detected games
+              </span>
+              <span className="text-[11px] text-zinc-400">
+                {detectedGames.length}
+              </span>
+              <span className="ml-auto text-[11px] font-medium text-zinc-400">
+                {gamesOpen ? "Hide" : "Show"} list
+              </span>
+            </button>
+            {gamesOpen && (
+              <div className="mt-2 max-h-[min(45vh,28rem)] overflow-y-auto rounded-xl border border-zinc-200/80 dark:border-white/[0.07]">
+                {detectedGames.map((app) => {
+                  const excluded = gameIsExcluded(app.process);
+                  const rule = explicitRule(app.process);
+                  return (
+                    <div
+                      key={app.process}
+                      className="flex items-center gap-3 border-b border-zinc-100 px-3 py-2 last:border-0 dark:border-white/[0.05]"
+                    >
+                      <Gamepad2 className="size-3.5 shrink-0 text-zinc-400" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-[11.5px] font-medium">
+                            {app.name}
+                          </span>
+                          {app.running && (
+                            <Badge tone="accent" dot>
+                              running
+                            </Badge>
+                          )}
+                        </div>
+                        <span className="block truncate font-mono text-[10.5px] text-zinc-400">
+                          {app.process}
+                          {rule && (
+                            <span className="ml-2 font-sans text-zinc-400">
+                              · manual rule
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <span
+                        className={cn(
+                          "text-[10.5px] font-medium",
+                          excluded ? "text-rose-500" : "text-emerald-500",
+                        )}
+                      >
+                        {excluded ? "Excluded" : "Allowed"}
+                      </span>
+                      <Switch
+                        size="sm"
+                        checked={excluded}
+                        disabled={gameBusy === app.process}
+                        onChange={(next) => void toggleGame(app, next)}
+                        label={`Pause mappings in ${app.name}`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <Callout tone="danger" className="mt-3">
+              We do not recommend allowing MouseMacro to run on top of a game.
+              Anti-cheat systems can treat injected input as cheating and ban
+              the account, even when every action is legitimate.
+            </Callout>
+          </div>
+        )}
+
+        {detectedGames.length === 0 && !loadingApps && (
+          <div className="border-t border-zinc-100 px-4 py-3 text-[11.5px] text-secondary dark:border-white/[0.055]">
+            No installed games were found. Use{" "}
+            <span className="font-medium">Rescan installed apps</span>, or add
+            a game manually below.
+          </div>
+        )}
+      </section>
 
       {rules.length === 0 ? (
         <div className="surface rounded-2xl">
@@ -243,11 +515,15 @@ export function ExceptionsPage() {
                     "grid size-8 shrink-0 place-items-center rounded-lg border",
                     rule.mode === "disable"
                       ? "border-rose-500/20 bg-rose-500/[0.07] text-rose-500"
-                      : "border-indigo-500/20 bg-indigo-500/[0.07] text-indigo-500",
+                      : rule.mode === "always"
+                        ? "border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-500"
+                        : "border-indigo-500/20 bg-indigo-500/[0.07] text-indigo-500",
                   )}
                 >
                   {rule.mode === "disable" ? (
                     <ShieldAlert className="size-4" />
+                  ) : rule.mode === "always" ? (
+                    <ShieldCheck className="size-4" />
                   ) : (
                     <Layers className="size-4" />
                   )}
@@ -266,7 +542,9 @@ export function ExceptionsPage() {
                   <div className="mt-0.5 text-[11.5px] text-secondary">
                     {rule.mode === "disable"
                       ? "Physical input passes through untouched."
-                      : `Use “${profile?.name ?? "missing profile"}” while this app is active.`}
+                      : rule.mode === "always"
+                        ? "Mappings run normally here, even in detected games."
+                        : `Use “${profile?.name ?? "missing profile"}” while this app is active.`}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -378,6 +656,14 @@ export function ExceptionsPage() {
               ]}
             />
           </Field>
+
+          {selectedIsGame && draft.mode !== "disable" && (
+            <Callout tone="danger">
+              This looks like a game. We do not recommend allowing MouseMacro
+              to run on top of games: anti-cheat systems can treat injected
+              input as cheating and ban the account.
+            </Callout>
+          )}
 
           {draft.mode === "profile" && (
             <Field label="Profile">
@@ -507,55 +793,100 @@ export function ExceptionsPage() {
           </div>
 
           <div>
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-[12.5px] font-medium">Open applications</span>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-[12.5px] font-medium">
+                Installed applications
+              </span>
+              <span className="text-[11px] text-zinc-400">
+                {apps.length} found
+              </span>
               <div className="relative ml-auto">
                 <Search className="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-zinc-400" />
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search"
-                  className="focus-ring h-7 w-36 rounded-lg border border-zinc-200 bg-white pl-7 pr-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
+                  placeholder="Search apps and games"
+                  className="focus-ring h-7 w-48 rounded-lg border border-zinc-200 bg-white pl-7 pr-2 text-[11.5px] dark:border-white/10 dark:bg-white/[0.04]"
                 />
               </div>
             </div>
-            <div className="max-h-44 overflow-y-auto rounded-xl border border-zinc-200/80 dark:border-white/[0.07]">
+            <div className="mb-2">
+              <Segmented
+                size="sm"
+                value={appFilter}
+                onChange={(value) =>
+                  setAppFilter(value as "all" | "games" | "running")
+                }
+                options={[
+                  { value: "all", label: "All" },
+                  {
+                    value: "games",
+                    label: `Games (${detectedGames.length})`,
+                  },
+                  { value: "running", label: "Running" },
+                ]}
+              />
+            </div>
+            <div className="max-h-[min(55vh,32rem)] overflow-y-auto rounded-xl border border-zinc-200/80 dark:border-white/[0.07]">
               {loadingApps && apps.length === 0 ? (
                 <div className="px-3 py-4 text-center text-[11.5px] text-zinc-400">
-                  Reading open windows…
+                  Scanning installed applications…
                 </div>
               ) : filteredApps.length === 0 ? (
                 <div className="px-3 py-4 text-center text-[11.5px] text-zinc-400">
-                  No matching windows. Type the executable name above.
+                  No matching application. Type the executable name above.
                 </div>
               ) : (
-                filteredApps.map((app) => (
-                  <button
-                    key={`${app.process}-${app.title}`}
-                    onClick={() =>
-                      setDraft({ ...draft, process: app.process })
-                    }
-                    className={cn(
-                      "flex w-full items-center gap-2 border-b border-zinc-100 px-3 py-2 text-left last:border-0 hover:bg-zinc-50 dark:border-white/[0.05] dark:hover:bg-white/[0.04]",
-                      draft.process === app.process &&
-                        "bg-indigo-500/[0.06] dark:bg-indigo-500/10",
-                    )}
-                  >
-                    <Monitor className="size-3.5 shrink-0 text-zinc-400" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[11.5px] font-medium">
-                        {app.title}
+                filteredApps.map((app) => {
+                  const hasRule = rules.some(
+                    (rule) => rule.process === app.process,
+                  );
+                  return (
+                    <button
+                      key={app.process}
+                      onClick={() =>
+                        setDraft({ ...draft, process: app.process })
+                      }
+                      className={cn(
+                        "flex w-full items-center gap-2 border-b border-zinc-100 px-3 py-2 text-left last:border-0 hover:bg-zinc-50 dark:border-white/[0.05] dark:hover:bg-white/[0.04]",
+                        draft.process === app.process &&
+                          "bg-indigo-500/[0.06] dark:bg-indigo-500/10",
+                      )}
+                    >
+                      {app.game ? (
+                        <Gamepad2 className="size-3.5 shrink-0 text-amber-500" />
+                      ) : (
+                        <Monitor className="size-3.5 shrink-0 text-zinc-400" />
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11.5px] font-medium">
+                          {app.name}
+                        </span>
+                        <span className="block truncate font-mono text-[10.5px] text-zinc-400">
+                          {app.process}
+                          {app.source === "steam" && " · Steam library"}
+                          {app.source === "epic" && " · Epic library"}
+                          {app.source === "riot" && " · Riot library"}
+                        </span>
                       </span>
-                      <span className="block truncate font-mono text-[10.5px] text-zinc-400">
-                        {app.process}
-                      </span>
-                    </span>
-                    {draft.process === app.process && (
-                      <Badge tone="accent">selected</Badge>
-                    )}
-                  </button>
-                ))
+                      {app.running && (
+                        <Badge tone="accent" dot>
+                          running
+                        </Badge>
+                      )}
+                      {app.game && <Badge tone="warning">game</Badge>}
+                      {hasRule && <Badge tone="outline">rule</Badge>}
+                      {draft.process === app.process && (
+                        <Badge tone="accent">selected</Badge>
+                      )}
+                    </button>
+                  );
+                })
               )}
+            </div>
+            <div className="mt-1.5 text-[10.5px] leading-relaxed text-zinc-400">
+              Installed apps come from the Start menu, Steam and Epic
+              libraries, plus apps that are currently running.
             </div>
           </div>
 

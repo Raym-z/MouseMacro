@@ -709,6 +709,20 @@ impl EngineService {
                     Some(config.settings.scroll.clone())
                 }
             });
+            return;
+        }
+
+        // Anti-cheat safety: detected games are excluded by default. An
+        // explicit rule above (including an "Always" rule) is the opt-out.
+        if config.settings.exclude_games
+            && config
+                .known_games
+                .iter()
+                .any(|game| game.eq_ignore_ascii_case(process))
+        {
+            runtime.exception_mode = ExceptionMode::Disable;
+            runtime.keyboard_disabled = true;
+            runtime.scroll = None;
         }
     }
 
@@ -1571,6 +1585,67 @@ mod tests {
         };
         EngineService::resolve_runtime(&config, &mut runtime);
         assert!(runtime.scroll.is_none());
+    }
+
+    #[test]
+    fn detected_games_are_disabled_by_default() {
+        let mut config = AppConfig::default();
+        config.settings.enabled = true;
+        config.known_games = vec!["game.exe".into()];
+        let mut runtime = RuntimeState {
+            foreground: Some("GAME.EXE".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Disable);
+        assert!(runtime.keyboard_disabled);
+        assert!(runtime.scroll.is_none());
+        assert!(!EngineService::compute_effective(&config, &runtime).enabled);
+    }
+
+    #[test]
+    fn an_explicit_rule_can_allow_a_detected_game() {
+        let mut config = AppConfig::default();
+        config.settings.enabled = true;
+        config.known_games = vec!["game.exe".into()];
+        config
+            .exceptions
+            .push(ExceptionRule::new("game.exe", ExceptionMode::Always));
+        let mut runtime = RuntimeState {
+            foreground: Some("game.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Always);
+        assert!(!runtime.keyboard_disabled);
+        assert!(EngineService::compute_effective(&config, &runtime).enabled);
+    }
+
+    #[test]
+    fn turning_off_the_game_guard_restores_mappings() {
+        let mut config = AppConfig::default();
+        config.settings.enabled = true;
+        config.settings.exclude_games = false;
+        config.known_games = vec!["game.exe".into()];
+        let mut runtime = RuntimeState {
+            foreground: Some("game.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Always);
+        assert!(EngineService::compute_effective(&config, &runtime).enabled);
+    }
+
+    #[test]
+    fn the_game_guard_leaves_unlisted_apps_alone() {
+        let mut config = AppConfig::default();
+        config.known_games = vec!["game.exe".into()];
+        let mut runtime = RuntimeState {
+            foreground: Some("photoshop.exe".into()),
+            ..RuntimeState::default()
+        };
+        EngineService::resolve_runtime(&config, &mut runtime);
+        assert_eq!(runtime.exception_mode, ExceptionMode::Always);
     }
 
     #[test]
