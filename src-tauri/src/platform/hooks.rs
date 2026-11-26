@@ -16,10 +16,10 @@ use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-    PeekMessageW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW,
+    SetWindowsHookExW, PeekMessageW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
@@ -143,7 +143,10 @@ pub fn start(service: Arc<EngineService>) -> Result<(), String> {
     }
     let _ = SERVICE.set(service.clone());
     service.set_hook_warning(None);
+    start_mouse_hook(service)
+}
 
+fn start_mouse_hook(service: Arc<EngineService>) -> Result<(), String> {
     let thread_service = service.clone();
     let (tx, rx) = mpsc::channel::<Startup>();
     thread::Builder::new()
@@ -170,7 +173,8 @@ pub fn start(service: Arc<EngineService>) -> Result<(), String> {
                 }
             };
 
-            MOUSE_HOOK_HANDLE.store(mouse_hook.0 as i64, Ordering::SeqCst);
+            let handle_value = mouse_hook.0 as i64;
+            MOUSE_HOOK_HANDLE.store(handle_value, Ordering::SeqCst);
             HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
             RUNNING.store(true, Ordering::SeqCst);
             thread_service.set_hooks_active(true);
@@ -185,9 +189,15 @@ pub fn start(service: Arc<EngineService>) -> Result<(), String> {
             }
 
             let _ = UnhookWindowsHookEx(mouse_hook);
+            let _ = MOUSE_HOOK_HANDLE.compare_exchange(
+                handle_value,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-            RUNNING.store(false, Ordering::SeqCst);
             thread_service.set_hooks_active(false);
+            RUNNING.store(false, Ordering::SeqCst);
         })
         .map_err(|error| format!("Could not start the input thread: {error}"))?;
 
@@ -203,6 +213,36 @@ pub fn start(service: Arc<EngineService>) -> Result<(), String> {
         }
         Err(_) => Err("The input hook thread did not start in time.".into()),
     }
+}
+
+fn stop_mouse_hook() {
+    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if thread_id == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostThreadMessageW(thread_id, 0x0012 /* WM_QUIT */, WPARAM(0), LPARAM(0));
+    }
+    for _ in 0..50 {
+        if !RUNNING.load(Ordering::SeqCst) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Stops and restarts the low-level mouse hook. Windows can silently remove a
+/// hook whose callback stalls; reinstalling restores mappings without a restart.
+pub fn reinstall_mouse_hook() -> Result<(), String> {
+    let service = SERVICE
+        .get()
+        .cloned()
+        .ok_or_else(|| "The input service is not ready yet.".to_string())?;
+    stop_mouse_hook();
+    if RUNNING.load(Ordering::SeqCst) {
+        return Err("The mouse hook thread did not stop.".into());
+    }
+    start_mouse_hook(service)
 }
 
 /// Starts a dedicated keyboard-hook thread on demand. The keyboard hook is only

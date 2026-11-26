@@ -15,15 +15,24 @@ use crate::state::{apply_window_theme, AppState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    // Development escape hatch: a stuck previous process must not block a test
+    // instance. Debug builds only; a release build always enforces one instance.
+    #[cfg(debug_assertions)]
+    let allow_multiple = std::env::var_os("MOUSEMACRO_ALLOW_MULTI").is_some();
+    #[cfg(not(debug_assertions))]
+    let allow_multiple = false;
+    if !allow_multiple {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(state) = app.try_state::<AppState>() {
                 state.show_window();
             } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+    let builder = builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -170,6 +179,8 @@ pub fn run() {
             commands::stop_capture,
             commands::get_capture_events,
             commands::active_capture_session,
+            commands::release_drag_locks,
+            commands::reinstall_input_hooks,
             commands::clear_warnings,
             commands::dismiss_banner,
             commands::open_config_folder,

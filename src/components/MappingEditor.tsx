@@ -125,7 +125,7 @@ const ACTION_TYPES: Array<{ value: Action["type"]; label: string }> = [
   { value: "key", label: "Single keyboard key" },
   { value: "holdKeys", label: "Hold keyboard keys" },
   { value: "mouseClick", label: "Mouse click" },
-  { value: "mouseHold", label: "Hold mouse button" },
+  { value: "mouseHold", label: "Hold mouse button (while held)" },
   { value: "scroll", label: "Scroll" },
   { value: "macro", label: "Macro (action sequence)" },
   { value: "launch", label: "Launch a program or URL" },
@@ -133,7 +133,7 @@ const ACTION_TYPES: Array<{ value: Action["type"]; label: string }> = [
   { value: "media", label: "Media key" },
   { value: "window", label: "Window action" },
   { value: "toggleKeys", label: "Toggle keys (sticky)" },
-  { value: "dragLock", label: "Drag lock" },
+  { value: "dragLock", label: "Drag lock (press to toggle)" },
   { value: "disable", label: "Disable the button" },
   { value: "none", label: "No action" },
 ];
@@ -231,6 +231,13 @@ export function ActionEditor({
                 }))}
               />
             </Field>
+            {action.type === "mouseHold" && (
+              <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                The button stays held only while the trigger is active, then
+                releases. For a keyboard source this is key down → button down →
+                key up → button up.
+              </p>
+            )}
           </div>
         )}
 
@@ -529,7 +536,8 @@ export function ActionEditor({
             </Field>
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
               Press once to keep the button held (handy for dragging), press
-              again to release it.
+              again to release it. Switching apps, changing settings, recording
+              or the panic hotkey also releases a drag lock.
             </p>
           </div>
         )}

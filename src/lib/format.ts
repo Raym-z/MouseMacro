@@ -189,7 +189,7 @@ export function actionLabel(action: Action): string {
     case "toggleKeys":
       return `Toggle ${keysLabel(action.keys)}`;
     case "dragLock":
-      return `Toggle hold ${buttonName(action.button)}`;
+      return `Drag lock ${buttonName(action.button)}`;
     case "combined":
       return action.actions.map(actionLabel).join(" + ");
     case "disable":

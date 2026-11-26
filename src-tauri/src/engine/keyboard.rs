@@ -284,6 +284,56 @@ mod tests {
     }
 
     #[test]
+    fn held_mouse_button_releases_on_key_up() {
+        use crate::config::model::MouseButton;
+
+        let mapping = action_mapping(
+            &["f11"],
+            Action::MouseHold {
+                button: MouseButton::Left,
+            },
+        );
+        let mut engine = KeyboardEngine::new(true, &[mapping]);
+
+        let press = down(&mut engine, F11, &[]);
+        assert!(press.suppress);
+        assert!(matches!(press.effects.as_slice(), [Effect::StartHold { .. }]));
+
+        let repeat = down(&mut engine, F11, &[]);
+        assert!(repeat.suppress);
+        assert!(repeat.effects.is_empty(), "auto-repeat must not restart the hold");
+
+        let release = up(&mut engine, F11, &[]);
+        assert!(release.suppress);
+        assert!(matches!(release.effects.as_slice(), [Effect::ReleaseHold { .. }]));
+    }
+
+    #[test]
+    fn combined_key_and_mouse_hold_releases_as_one_group() {
+        use crate::config::model::MouseButton;
+
+        let mapping = action_mapping(
+            &["f11"],
+            Action::Combined {
+                actions: vec![
+                    Action::HoldKeys {
+                        keys: vec!["space".into()],
+                    },
+                    Action::MouseHold {
+                        button: MouseButton::Left,
+                    },
+                ],
+            },
+        );
+        let mut engine = KeyboardEngine::new(true, &[mapping]);
+
+        let press = down(&mut engine, F11, &[]);
+        assert!(matches!(press.effects.as_slice(), [Effect::StartHold { .. }]));
+        let release = up(&mut engine, F11, &[]);
+        assert!(matches!(release.effects.as_slice(), [Effect::ReleaseHold { .. }]));
+    }
+
+    #[test]
     fn unmatched_keys_pass_through() {
         let mut engine =
             KeyboardEngine::new(true, &[action_mapping(&["f12"], shortcut(&["a"]))]);

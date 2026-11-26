@@ -221,6 +221,12 @@ export function SettingsPage() {
     setSaving(false);
   };
 
+  const releaseDragLocks = async () => {
+    setSaving(true);
+    await runSnapshot(() => api.releaseDragLocks(), "Drag locks released");
+    setSaving(false);
+  };
+
   const configurableOrder: RuleCategory[] = (() => {
     const ordered = settings.rulePriority.filter((category) =>
       RELEASE_CATEGORIES.includes(category),
@@ -752,6 +758,20 @@ export function SettingsPage() {
                   Ready
                 </Badge>
               )
+            }
+          />
+          <SettingRow
+            title="Drag locks"
+            description="Frees any button held by the Drag lock action. Switching apps, changing settings or recording also releases them."
+            control={
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={saving}
+                onClick={releaseDragLocks}
+              >
+                Release
+              </Button>
             }
           />
           <div className="border-b border-zinc-100 px-4 py-3.5 dark:border-white/[0.055]">

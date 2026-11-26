@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Play, Square } from "lucide-react";
+import { Activity, Play, RefreshCw, Square } from "lucide-react";
 import { api, errorMessage } from "../lib/api";
 import type { InputSample } from "../lib/types";
 import { cn } from "../lib/cn";
@@ -44,6 +44,7 @@ export function InputDiagnostics() {
   const [running, setRunning] = useState(false);
   const [samples, setSamples] = useState<InputSample[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!running) return;
@@ -69,6 +70,7 @@ export function InputDiagnostics() {
 
   const start = async () => {
     setError(null);
+    setNotice(null);
     setSamples([]);
     try {
       await api.clearInputDiagnostics();
@@ -77,6 +79,17 @@ export function InputDiagnostics() {
       return;
     }
     setRunning(true);
+  };
+
+  const reinstall = async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      await api.reinstallHooks();
+      setNotice("Mouse hook reinstalled. Mappings are live again.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
   };
 
   const visible = samples.slice(0, 10);
@@ -102,6 +115,15 @@ export function InputDiagnostics() {
           </span>
           <Button
             size="sm"
+            variant="ghost"
+            icon={<RefreshCw />}
+            onClick={reinstall}
+            title="Reinstall the mouse hook if mouse mappings stopped working."
+          >
+            Reinstall
+          </Button>
+          <Button
+            size="sm"
             variant={running ? "secondary" : "subtle"}
             icon={running ? <Square /> : <Play />}
             onClick={() => {
@@ -116,6 +138,12 @@ export function InputDiagnostics() {
           </Button>
         </span>
       </div>
+
+      {notice && (
+        <p className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
+          {notice}
+        </p>
+      )}
 
       <div className="mt-2 space-y-1">
         {error ? (

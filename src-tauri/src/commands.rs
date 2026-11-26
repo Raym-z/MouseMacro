@@ -377,6 +377,19 @@ pub fn active_capture_session(state: State<'_, AppState>) -> Option<u64> {
     state.active_capture_session()
 }
 
+/// Releases toggled drag-lock buttons without pausing the rest of the engine.
+#[tauri::command]
+pub fn release_drag_locks(state: State<'_, AppState>) -> Snapshot {
+    state.release_drag_locks()
+}
+
+/// Reinstalls the low-level mouse hook after Windows has dropped it.
+#[tauri::command]
+pub fn reinstall_input_hooks(state: State<'_, AppState>) -> Result<Snapshot, String> {
+    state.reinstall_input_hooks()?;
+    Ok(state.snapshot())
+}
+
 #[tauri::command]
 pub fn clear_warnings(state: State<'_, AppState>) -> Snapshot {
     state.clear_warnings()

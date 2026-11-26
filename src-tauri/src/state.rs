@@ -175,6 +175,18 @@ impl AppState {
         self.engine.stop_capture(session_id);
     }
 
+    /// Releases toggled drag-lock buttons without pausing the engine.
+    pub fn release_drag_locks(&self) -> Snapshot {
+        self.engine.release_drag_locks();
+        self.snapshot()
+    }
+
+    /// Reinstalls the low-level mouse hook. Windows can silently drop a hook
+    /// whose callback stalls; this restores mappings without a restart.
+    pub fn reinstall_input_hooks(&self) -> Result<(), String> {
+        crate::platform::hooks::reinstall_mouse_hook()
+    }
+
     pub fn capture_events(
         &self,
         session_id: u64,

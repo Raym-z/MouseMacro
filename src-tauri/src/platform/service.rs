@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -263,6 +264,18 @@ impl Executor {
         self.finish(result);
     }
 
+    /// Releases every toggled drag-lock button. Drag locks are not tied to a
+    /// physical press, so they must be cleared when the environment changes.
+    pub fn release_toggles(&self) {
+        let toggles: Vec<HeldSynthetic> = {
+            let mut toggles = self.toggles.lock().unwrap_or_else(|e| e.into_inner());
+            toggles.drain().map(|(_, held)| held).collect()
+        };
+        for held in toggles {
+            self.finish(held.release());
+        }
+    }
+
     pub fn release_all(&self) {
         self.cancel_macros();
         let held: Vec<HeldSynthetic> = {
@@ -522,6 +535,10 @@ pub struct EngineService {
     hooks_active: AtomicBool,
     hook_warning: Mutex<Option<String>>,
     last_wheel_ms: AtomicU64,
+    /// Effects are executed on a dedicated thread. Low-level hooks must return
+    /// immediately; injecting input from inside them can make Windows drop the
+    /// hook when a callback stalls.
+    effects: mpsc::Sender<Vec<Effect>>,
 }
 
 impl EngineService {
@@ -529,6 +546,7 @@ impl EngineService {
         let mut runtime = RuntimeState::default();
         Self::resolve_runtime(config, &mut runtime);
         let effective = Self::compute_effective(config, &runtime);
+        let (effects, effect_rx) = mpsc::channel();
         let service = Arc::new(Self {
             inner: Mutex::new(Inner {
                 engine: InputEngine::new(effective.clone()),
@@ -548,10 +566,38 @@ impl EngineService {
             hooks_active: AtomicBool::new(false),
             hook_warning: Mutex::new(None),
             last_wheel_ms: AtomicU64::new(0),
+            effects,
         });
+        Self::spawn_effects(service.clone(), effect_rx);
         service.sync_keyboard_hook();
         Self::spawn_timer(service.clone());
         service
+    }
+
+    /// Dedicated input-effects thread. The hooks only enqueue; all SendInput
+    /// work happens here, so a slow target can never stall a low-level hook.
+    fn spawn_effects(service: Arc<Self>, effects: mpsc::Receiver<Vec<Effect>>) {
+        let _ = thread::Builder::new()
+            .name("mouse-actions".into())
+            .spawn(move || {
+                while let Ok(batch) = effects.recv() {
+                    // A panic in one action must not kill the effect thread;
+                    // otherwise the next hook callback would execute inline and
+                    // risk stalling the hook.
+                    let _ = catch_unwind(AssertUnwindSafe(|| service.execute(batch)));
+                }
+            });
+    }
+
+    fn dispatch(&self, effects: Vec<Effect>) {
+        if effects.is_empty() {
+            return;
+        }
+        if let Err(error) = self.effects.send(effects) {
+            // The worker is gone (failed to spawn or panicked): run inline so
+            // mappings still work instead of silently stopping.
+            self.execute(error.0);
+        }
     }
 
     fn spawn_timer(service: Arc<Self>) {
@@ -587,7 +633,7 @@ impl EngineService {
                     }
                 };
                 service.cv.notify_all();
-                service.execute(effects);
+                service.dispatch(effects);
             });
     }
 
@@ -690,7 +736,8 @@ impl EngineService {
             effects
         };
         self.cv.notify_all();
-        self.execute(effects);
+        self.executor.release_toggles();
+        self.dispatch(effects);
         self.sync_keyboard_hook();
         if notify {
             let _ = self.app.emit("state:changed", ());
@@ -869,12 +916,19 @@ impl EngineService {
         self.executor.release_all();
     }
 
+    /// Releases just the toggled drag-lock buttons. Used by Settings so a lock
+    /// can be cleared without pausing the engine.
+    pub fn release_drag_locks(&self) {
+        self.executor.release_toggles();
+    }
+
     /// Kept for Input diagnostics, which only needs the passive monitor mode.
     /// Recording uses the capture session API instead.
     pub fn set_capture_mode(&self, mode: CaptureMode) -> Result<(), String> {
         match mode {
             CaptureMode::Monitor => {
                 self.stop_session(None, "replaced");
+                self.executor.release_toggles();
                 self.capture
                     .store(CaptureMode::Monitor as u8, Ordering::SeqCst);
             }
@@ -895,6 +949,9 @@ impl EngineService {
     /// Starts a recording session. Any previous session is stopped first.
     pub fn start_capture(&self, kind: CaptureKind) -> Result<CaptureSessionInfo, String> {
         self.stop_session(None, "replaced");
+        // A held drag lock would interfere with the recording and could leave
+        // the button down while the user is trying to click Stop.
+        self.executor.release_toggles();
         let info = {
             let mut runtime = self
                 .capture_runtime
@@ -1127,7 +1184,7 @@ impl EngineService {
             inner.engine.handle(event)
         };
         self.cv.notify_all();
-        self.execute(outcome.effects);
+        self.dispatch(outcome.effects);
 
         if let Some((settings, direction, notches)) = transform {
             // The engine matched a gesture: the physical event is consumed.
@@ -1239,7 +1296,7 @@ impl EngineService {
             inner.keyboard.handle(vk, is_down, &modifiers)
         };
         self.cv.notify_all();
-        self.execute(outcome.effects);
+        self.dispatch(outcome.effects);
         outcome.suppress
     }
 
