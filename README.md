@@ -154,14 +154,16 @@ touching Windows APIs:
 - **Input diagnostics** in Settings: press Start, use the mouse, press Stop — the
   last mouse events are listed with axis, delta and whether they were filtered
   as synthetic. Also an opt-in to process input synthesized by other utilities
-  (mouse vendor software, touchpad drivers, remote desktop).
+  (mouse vendor software, touchpad drivers, remote desktop), and a **Reinstall**
+  button that restores the low-level mouse hook if Windows dropped it.
 
 ### Safety
 - Atomic config writes with rotating timestamped backups and corrupt-file
   recovery.
 - Hook and hotkey failures are surfaced in the UI, never silently ignored.
 - Corrupt configuration cannot brick startup; defaults are restored.
-- An app switch or emergency stop releases every synthetic hold.
+- An app switch or emergency stop releases every synthetic hold, including
+  drag locks.
 
 ---
 
@@ -217,7 +219,7 @@ terminal to attach logs.
 ## Tests
 
 ```powershell
-npm run test:rust   # 123 engine/config/hook/capture/service tests
+npm run test:rust   # 125 engine/config/hook/capture/service tests
 npm run build       # TypeScript typecheck + production frontend build
 ```
 

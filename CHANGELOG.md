@@ -4,6 +4,40 @@ All notable changes to MouseMacro are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [1.6.1] — 2026-11-26
+
+Reliability fixes for the input hooks and drag locks.
+
+### Fixed
+
+- **Mouse mappings could stop working after a drag lock.** Input actions are now
+  executed on a dedicated effects thread instead of inside the low-level hook.
+  A slow `SendInput` can no longer stall a hook until Windows silently removes
+  it, which left the mouse listener dead while the keyboard kept working.
+- **Recover a dropped hook without restarting.** Settings → Input diagnostics
+  now has a **Reinstall** button (and a `reinstall_input_hooks` command) that
+  reinstalls the low-level mouse hook.
+- **Drag locks can no longer stay held across context changes.** A toggled
+  button is released on app switch, profile/config change, engine disable,
+  recording start, panic and exit. Settings → Safety also has a **Release**
+  button for drag locks.
+- The action list now distinguishes **Hold mouse button (while held)** from
+  **Drag lock (press to toggle)** and explains the release rules on each.
+- Key-held mouse holds (`key down → mouse down → key up → mouse up`) are now
+  covered by keyboard-engine tests.
+
+### Changed
+
+- Low-level hooks only classify events and enqueue effects; the new
+  `mouse-actions` thread performs injection in order. Panic and release paths
+  still execute immediately.
+- Debug builds accept `MOUSEMACRO_ALLOW_MULTI=1` to start a second instance for
+  testing around a stuck previous process.
+
+### Tests
+
+- 125 Rust tests, including key-held `MouseHold` and combined hold/release.
+
 ## [1.6.0] — 2026-11-26
 
 Settings search, snappier defaults and layout polish.
